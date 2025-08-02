@@ -1,0 +1,149 @@
+version: '3.8'
+
+services:
+  # OpenSanctions Elasticsearch Index
+  opensanctions-index:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.14.3
+    container_name: opensanctions-index
+    expose:
+      - "9200"
+    ports:
+      - "9200:9200"
+    environment:
+      - node.name=opensanctions-index
+      - cluster.name=opensanctions-cluster
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms2g -Xmx2g"
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - opensanctions-data:/usr/share/elasticsearch/data
+    networks:
+      - sanctionsguard-network
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9200/_cluster/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # OpenSanctions Yente API
+  opensanctions-api:
+    image: ghcr.io/opensanctions/yente:4.3.1
+    container_name: opensanctions-api
+    depends_on:
+      opensanctions-index:
+        condition: service_healthy
+    ports:
+      - "9000:8000"  # Changed to port 9000 to avoid conflict
+    environment:
+      YENTE_INDEX_TYPE: "elasticsearch"
+      YENTE_INDEX_URL: http://opensanctions-index:9200
+      YENTE_UPDATE_TOKEN: ""
+    networks:
+      - sanctionsguard-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    deploy:
+      mode: replicated
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+        delay: 10s
+        max_attempts: 3
+        window: 120s
+
+  # Our Application Database
+  postgres:
+    image: postgres:15
+    container_name: sanctionsguard-postgres
+    environment:
+      POSTGRES_DB: sanctionsguard
+      POSTGRES_USER: sanctionsguard
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secure_password_123}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d/
+    ports:
+      - "5432:5432"
+    networks:
+      - sanctionsguard-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sanctionsguard -d sanctionsguard"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Our Application Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: sanctionsguard-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - sanctionsguard-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Our Backend Application
+  backend:
+    build: ./backend
+    container_name: sanctionsguard-backend
+    environment:
+      - DATABASE_URL=postgresql://sanctionsguard:${POSTGRES_PASSWORD:-secure_password_123}@postgres:5432/sanctionsguard
+      - REDIS_URL=redis://redis:6379
+      - CORS_ORIGINS=["http://localhost:3000"]
+      - OPENSANCTIONS_BASE_URL=http://opensanctions-api:8000
+      - OPENSANCTIONS_EXTERNAL_URL=http://localhost:9000  # For frontend proxy
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      opensanctions-api:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app
+    networks:
+      - sanctionsguard-network
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # Our Frontend Application
+  frontend:
+    build: ./frontend
+    container_name: sanctionsguard-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    networks:
+      - sanctionsguard-network
+    environment:
+      - VITE_API_BASE_URL=http://localhost:8000
+      - VITE_OPENSANCTIONS_URL=http://localhost:9000
+
+volumes:
+  opensanctions-data:
+    driver: local
+  postgres_data:
+    driver: local
+
+networks:
+  sanctionsguard-network:
+    driver: bridge
