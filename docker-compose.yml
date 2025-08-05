@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   # OpenSanctions Elasticsearch Index
   opensanctions-index:
@@ -103,11 +101,11 @@ services:
     environment:
       - DATABASE_URL=postgresql://sanctionsguard:${POSTGRES_PASSWORD:-secure_password_123}@postgres:5432/sanctionsguard
       - REDIS_URL=redis://redis:6379
-      - CORS_ORIGINS=["http://localhost:3000"]
+      - CORS_ORIGINS=["http://localhost:3000","http://192.168.0.114:3000","https://simple-sanctionsguard.loca.lt"]
       - OPENSANCTIONS_BASE_URL=http://opensanctions-api:8000
       - OPENSANCTIONS_EXTERNAL_URL=http://localhost:9000  # For frontend proxy
     ports:
-      - "8000:8000"
+      - "0.0.0.0:8000:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -126,7 +124,7 @@ services:
     build: ./frontend
     container_name: sanctionsguard-frontend
     ports:
-      - "3000:3000"
+      - "0.0.0.0:3000:3000"
     depends_on:
       - backend
     volumes:

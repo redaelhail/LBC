@@ -1,12 +1,16 @@
 # backend/app/api/v1/endpoints/search.py - Updated with better error handling
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 import httpx
 import asyncio
 import logging
 from app.core.config import settings
+from app.database import get_db
+from app.models.search_history import SearchHistory
+from app.models.search_notes import SearchNote
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -20,8 +24,17 @@ class SearchRequest(BaseModel):
     countries: Optional[List[str]] = None
     topics: Optional[List[str]] = None
 
+class NoteRequest(BaseModel):
+    search_history_id: int
+    entity_id: str
+    entity_name: str
+    note_text: str
+    risk_assessment: Optional[str] = None
+    action_taken: Optional[str] = None
+    user_id: Optional[int] = 1
+
 @router.post("/entities")
-async def search_entities(request: SearchRequest) -> Dict[str, Any]:
+async def search_entities(request: SearchRequest, db: Session = Depends(get_db)) -> Dict[str, Any]:
     """Search for entities using OpenSanctions API with better error handling"""
     
     opensanctions_url = settings.OPENSANCTIONS_BASE_URL
@@ -67,7 +80,7 @@ async def search_entities(request: SearchRequest) -> Dict[str, Any]:
                     enhanced_entity = enhance_entity_for_morocco(entity)
                     enhanced_results.append(enhanced_entity)
                 
-                return {
+                response_data = {
                     "results": enhanced_results,
                     "total": opensanctions_data.get("total", {"value": len(enhanced_results)}),
                     "query": request.query,
@@ -76,6 +89,11 @@ async def search_entities(request: SearchRequest) -> Dict[str, Any]:
                     "api_url": f"{opensanctions_url}/search/{request.dataset}",
                     "status": "success"
                 }
+                
+                # Save search to history
+                await save_search_to_history(db, request, enhanced_results, "opensanctions")
+                
+                return response_data
                 
             elif response.status_code == 500:
                 # Handle 500 errors specifically
@@ -88,48 +106,67 @@ async def search_entities(request: SearchRequest) -> Dict[str, Any]:
                 except:
                     pass
                 
-                return generate_fallback_response(request, {
-                    "status": "initializing",
+                fallback_response = generate_fallback_response(request, {
+                    "status": "initializing", 
                     "message": error_detail,
                     "http_status": 500
                 })
+                # Save fallback search to history
+                mock_results = fallback_response["results"]
+                await save_search_to_history(db, request, mock_results, "mock")
+                return fallback_response
                 
             elif response.status_code == 404:
                 logger.warning(f"Dataset '{request.dataset}' not found")
-                return generate_fallback_response(request, {
+                fallback_response = generate_fallback_response(request, {
                     "status": "dataset_not_found",
                     "message": f"Dataset '{request.dataset}' not available",
                     "http_status": 404
                 })
+                mock_results = fallback_response["results"]
+                await save_search_to_history(db, request, mock_results, "mock")
+                return fallback_response
                 
             else:
                 logger.warning(f"OpenSanctions API returned unexpected status {response.status_code}")
-                return generate_fallback_response(request, {
+                fallback_response = generate_fallback_response(request, {
                     "status": "api_error",
                     "message": f"API returned status {response.status_code}",
                     "http_status": response.status_code
                 })
+                mock_results = fallback_response["results"]
+                await save_search_to_history(db, request, mock_results, "mock")
+                return fallback_response
                 
     except httpx.TimeoutException:
         logger.error("OpenSanctions API timeout")
-        return generate_fallback_response(request, {
+        fallback_response = generate_fallback_response(request, {
             "status": "timeout",
             "message": "OpenSanctions API timeout - service may be overloaded"
         })
+        mock_results = fallback_response["results"]
+        await save_search_to_history(db, request, mock_results, "mock")
+        return fallback_response
         
     except httpx.ConnectError:
         logger.error("Cannot connect to OpenSanctions API")
-        return generate_fallback_response(request, {
+        fallback_response = generate_fallback_response(request, {
             "status": "connection_error",
             "message": "Cannot connect to OpenSanctions API - service may be down"
         })
+        mock_results = fallback_response["results"]
+        await save_search_to_history(db, request, mock_results, "mock")
+        return fallback_response
         
     except Exception as e:
         logger.error(f"Unexpected error calling OpenSanctions API: {str(e)}")
-        return generate_fallback_response(request, {
+        fallback_response = generate_fallback_response(request, {
             "status": "unexpected_error",
             "message": str(e)
         })
+        mock_results = fallback_response["results"]
+        await save_search_to_history(db, request, mock_results, "mock")
+        return fallback_response
 
 async def check_opensanctions_health() -> Dict[str, Any]:
     """Check if OpenSanctions API is healthy"""
@@ -168,6 +205,50 @@ async def check_opensanctions_health() -> Dict[str, Any]:
             "status": "error",
             "message": f"Health check failed: {str(e)}"
         }
+
+async def save_search_to_history(db: Session, request: SearchRequest, results: List[Dict], source: str):
+    """Save search results to history database"""
+    try:
+        # Calculate risk metrics
+        risk_scores = [r.get("morocco_risk_score", 0) for r in results]
+        avg_risk = sum(risk_scores) / len(risk_scores) if risk_scores else 0
+        max_risk = max(risk_scores) if risk_scores else 0
+        
+        risk_level = "HIGH" if max_risk >= 80 else "MEDIUM" if max_risk >= 50 else "LOW"
+        
+        # Determine search type
+        search_type = determine_search_type(request.query)
+        
+        # Create history entry
+        history_entry = SearchHistory(
+            query=request.query,
+            search_type=search_type,
+            results_count=len(results),
+            risk_level=risk_level,
+            risk_score=avg_risk,
+            data_source=source,
+            results_data=results,  # Store full results for later reference
+            user_id=1  # Default user for now
+        )
+        
+        db.add(history_entry)
+        db.commit()
+        db.refresh(history_entry)
+        
+        logger.info(f"Saved search to history: {history_entry.id}")
+        
+    except Exception as e:
+        logger.error(f"Failed to save search to history: {e}")
+        db.rollback()
+
+def determine_search_type(query: str) -> str:
+    """Determine if search is for Person or Company based on query"""
+    company_indicators = ["ltd", "inc", "corp", "llc", "company", "bank", "group", "holdings"]
+    query_lower = query.lower()
+    
+    if any(indicator in query_lower for indicator in company_indicators):
+        return "Company"
+    return "Person"
 
 def generate_fallback_response(request: SearchRequest, error_info: Dict[str, Any]) -> Dict[str, Any]:
     """Generate fallback response with mock data and error information"""
@@ -221,6 +302,284 @@ def get_troubleshooting_tips(status: str) -> List[str]:
     }
     
     return tips.get(status, ["Check OpenSanctions logs and documentation"])
+
+@router.get("/history")
+async def get_search_history(
+    limit: int = 50, 
+    offset: int = 0, 
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Get search history with pagination"""
+    
+    try:
+        # Try to get from database
+        total = db.query(SearchHistory).count()
+        searches = db.query(SearchHistory)\
+            .order_by(SearchHistory.created_at.desc())\
+            .offset(offset)\
+            .limit(limit)\
+            .all()
+        
+        items = [
+            {
+                "id": search.id,
+                "query": search.query,
+                "search_type": search.search_type,
+                "results_count": search.results_count,
+                "risk_level": search.risk_level,
+                "risk_score": search.risk_score,
+                "created_at": search.created_at.isoformat(),
+                "data_source": search.data_source,
+                "execution_time_ms": search.execution_time_ms,
+                "is_starred": getattr(search, 'is_starred', False),
+                "tags": getattr(search, 'tags', None)
+            }
+            for search in searches
+        ]
+        
+        return {
+            "items": items,
+            "total": total,
+            "page": (offset // limit) + 1,
+            "pages": (total + limit - 1) // limit,
+            "limit": limit,
+            "offset": offset,
+            "source": "database"
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get search history: {e}")
+        return {
+            "items": [],
+            "total": 0,
+            "page": 1,
+            "pages": 0,
+            "limit": limit,
+            "offset": offset,
+            "source": "error",
+            "error": str(e)
+        }
+
+@router.post("/notes")
+async def add_note(note_request: NoteRequest, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    """Add a note to a specific search result entity"""
+    try:
+        # Verify search history exists
+        search_history = db.query(SearchHistory).filter(SearchHistory.id == note_request.search_history_id).first()
+        if not search_history:
+            raise HTTPException(status_code=404, detail="Search history not found")
+        
+        # Create note
+        note = SearchNote(
+            search_history_id=note_request.search_history_id,
+            entity_id=note_request.entity_id,
+            entity_name=note_request.entity_name,
+            note_text=note_request.note_text,
+            risk_assessment=note_request.risk_assessment,
+            action_taken=note_request.action_taken,
+            user_id=note_request.user_id
+        )
+        
+        db.add(note)
+        db.commit()
+        db.refresh(note)
+        
+        return {
+            "id": note.id,
+            "message": "Note added successfully",
+            "entity_name": note.entity_name
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to add note: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to add note")
+
+@router.get("/notes/{search_history_id}")
+async def get_notes(search_history_id: int, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    """Get all notes for a specific search history"""
+    try:
+        notes = db.query(SearchNote).filter(SearchNote.search_history_id == search_history_id).all()
+        
+        return {
+            "notes": [
+                {
+                    "id": note.id,
+                    "entity_id": note.entity_id,
+                    "entity_name": note.entity_name,
+                    "note_text": note.note_text,
+                    "risk_assessment": note.risk_assessment,
+                    "action_taken": note.action_taken,
+                    "created_at": note.created_at.isoformat(),
+                    "updated_at": note.updated_at.isoformat()
+                }
+                for note in notes
+            ],
+            "total": len(notes)
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get notes: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve notes")
+
+@router.get("/history/{history_id}/details")
+async def get_search_details(history_id: int, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    """Get detailed search results with notes"""
+    try:
+        search_history = db.query(SearchHistory).filter(SearchHistory.id == history_id).first()
+        if not search_history:
+            raise HTTPException(status_code=404, detail="Search history not found")
+        
+        # Get notes for this search
+        notes = db.query(SearchNote).filter(SearchNote.search_history_id == history_id).all()
+        
+        # Group notes by entity_id
+        notes_by_entity = {}
+        for note in notes:
+            if note.entity_id not in notes_by_entity:
+                notes_by_entity[note.entity_id] = []
+            notes_by_entity[note.entity_id].append({
+                "id": note.id,
+                "note_text": note.note_text,
+                "risk_assessment": note.risk_assessment,
+                "action_taken": note.action_taken,
+                "created_at": note.created_at.isoformat(),
+                "updated_at": note.updated_at.isoformat()
+            })
+        
+        return {
+            "search_history": {
+                "id": search_history.id,
+                "query": search_history.query,
+                "search_type": search_history.search_type,
+                "results_count": search_history.results_count,
+                "risk_level": search_history.risk_level,
+                "risk_score": search_history.risk_score,
+                "data_source": search_history.data_source,
+                "created_at": search_history.created_at.isoformat(),
+                "results_data": search_history.results_data or []
+            },
+            "notes_by_entity": notes_by_entity,
+            "total_notes": len(notes)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get search details: {e}")
+        raise HTTPException(status_code=500, detail="Failed to retrieve search details")
+
+@router.put("/history/{history_id}/star")
+async def toggle_star_search(history_id: int, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    """Toggle star status of a search"""
+    try:
+        search_history = db.query(SearchHistory).filter(SearchHistory.id == history_id).first()
+        if not search_history:
+            raise HTTPException(status_code=404, detail="Search history not found")
+        
+        # Toggle starred status
+        search_history.is_starred = not getattr(search_history, 'is_starred', False)
+        db.commit()
+        db.refresh(search_history)
+        
+        return {
+            "id": search_history.id,
+            "is_starred": search_history.is_starred,
+            "message": "Starred" if search_history.is_starred else "Unstarred"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to toggle star: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to update star status")
+
+@router.get("/analytics")
+async def get_search_analytics(db: Session = Depends(get_db)) -> Dict[str, Any]:
+    """Get comprehensive search analytics"""
+    try:
+        from sqlalchemy import func, text
+        from datetime import datetime, timedelta
+        
+        # Basic stats
+        total_searches = db.query(SearchHistory).count()
+        starred_searches = db.query(SearchHistory).filter(SearchHistory.is_starred == True).count()
+        
+        # Risk level distribution
+        risk_stats = db.query(
+            SearchHistory.risk_level,
+            func.count(SearchHistory.id).label('count')
+        ).group_by(SearchHistory.risk_level).all()
+        
+        # Data source stats
+        source_stats = db.query(
+            SearchHistory.data_source,
+            func.count(SearchHistory.id).label('count')
+        ).group_by(SearchHistory.data_source).all()
+        
+        # Recent activity (last 7 days)
+        week_ago = datetime.utcnow() - timedelta(days=7)
+        recent_activity = db.query(
+            func.date(SearchHistory.created_at).label('date'),
+            func.count(SearchHistory.id).label('count')
+        ).filter(
+            SearchHistory.created_at >= week_ago
+        ).group_by(func.date(SearchHistory.created_at)).all()
+        
+        # Top queries
+        top_queries = db.query(
+            SearchHistory.query,
+            func.count(SearchHistory.id).label('count'),
+            func.max(SearchHistory.created_at).label('last_searched')
+        ).group_by(SearchHistory.query).order_by(func.count(SearchHistory.id).desc()).limit(10).all()
+        
+        # Average risk scores
+        avg_risk_score = db.query(func.avg(SearchHistory.risk_score)).scalar() or 0
+        
+        # Performance stats
+        avg_execution_time = db.query(func.avg(SearchHistory.execution_time_ms)).scalar() or 0
+        
+        return {
+            "summary": {
+                "total_searches": total_searches,
+                "starred_searches": starred_searches,
+                "avg_risk_score": round(float(avg_risk_score), 2),
+                "avg_execution_time_ms": round(float(avg_execution_time), 2)
+            },
+            "risk_distribution": [
+                {"level": r.risk_level, "count": r.count}
+                for r in risk_stats
+            ],
+            "data_sources": [
+                {"source": s.data_source, "count": s.count}
+                for s in source_stats
+            ],
+            "recent_activity": [
+                {"date": str(a.date), "count": a.count}
+                for a in recent_activity
+            ],
+            "top_queries": [
+                {
+                    "query": q.query,
+                    "count": q.count,
+                    "last_searched": q.last_searched.isoformat()
+                }
+                for q in top_queries
+            ]
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get analytics: {e}")
+        return {
+            "summary": {"total_searches": 0, "starred_searches": 0, "avg_risk_score": 0, "avg_execution_time_ms": 0},
+            "risk_distribution": [],
+            "data_sources": [],
+            "recent_activity": [],
+            "top_queries": []
+        }
 
 @router.get("/datasets")
 async def get_available_datasets():
@@ -305,38 +664,6 @@ async def check_elasticsearch_health() -> Dict[str, Any]:
             "message": f"Cannot connect to Elasticsearch: {str(e)}"
         }
 
-@router.get("/history")
-async def get_search_history():
-    """Get search history - Mock implementation"""
-    
-    mock_history = [
-        {
-            "id": 1,
-            "query": "Mohammed Hassan",
-            "search_type": "Person",
-            "results_count": 3,
-            "risk_level": "Medium",
-            "created_at": "2025-01-15T10:30:00Z",
-            "data_source": "opensanctions"
-        },
-        {
-            "id": 2,
-            "query": "Atlas Bank",
-            "search_type": "Company", 
-            "results_count": 0,
-            "risk_level": "Low",
-            "created_at": "2025-01-14T15:20:00Z",
-            "data_source": "mock"
-        }
-    ]
-    
-    return {
-        "items": mock_history,
-        "total": len(mock_history),
-        "page": 1,
-        "pages": 1,
-        "source": "mock"
-    }
 
 # Keep the existing helper functions (enhance_entity_for_morocco, generate_mock_results, etc.)
 def enhance_entity_for_morocco(entity: Dict[str, Any]) -> Dict[str, Any]:

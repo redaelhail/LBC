@@ -1,0 +1,71 @@
+version: '3.8'
+
+# Lightweight development configuration - faster startup
+services:
+  # Skip OpenSanctions for faster development
+  # Use mock data only during development
+  
+  postgres:
+    image: postgres:15
+    container_name: sanctionsguard-postgres
+    environment:
+      POSTGRES_DB: sanctionsguard
+      POSTGRES_USER: sanctionsguard
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secure_password_123}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./database/init:/docker-entrypoint-initdb.d/
+    ports:
+      - "5432:5432"
+    networks:
+      - sanctionsguard-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: sanctionsguard-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - sanctionsguard-network
+
+  backend:
+    build: ./backend
+    container_name: sanctionsguard-backend
+    environment:
+      - DATABASE_URL=postgresql://sanctionsguard:${POSTGRES_PASSWORD:-secure_password_123}@postgres:5432/sanctionsguard
+      - REDIS_URL=redis://redis:6379
+      - CORS_ORIGINS=["http://localhost:3000"]
+      - OPENSANCTIONS_BASE_URL=http://mock-opensanctions:8000  # Force mock mode
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./backend:/app
+    networks:
+      - sanctionsguard-network
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+  frontend:
+    build: ./frontend
+    container_name: sanctionsguard-frontend
+    ports:
+      - "3000:3000"
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    networks:
+      - sanctionsguard-network
+    environment:
+      - VITE_API_BASE_URL=http://localhost:8000
+
+volumes:
+  postgres_data:
+    driver: local
+
+networks:
+  sanctionsguard-network:
+    driver: bridge
