@@ -11,6 +11,8 @@ from app.core.config import settings
 from app.database import get_db
 from app.models.search_history import SearchHistory
 from app.models.search_notes import SearchNote
+from app.models.starred_entity import StarredEntity
+from app.services.moroccan_entities import moroccan_entities_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -32,6 +34,22 @@ class NoteRequest(BaseModel):
     risk_assessment: Optional[str] = None
     action_taken: Optional[str] = None
     user_id: Optional[int] = 1
+
+class StarEntityRequest(BaseModel):
+    search_history_id: int
+    entity_id: str
+    entity_name: str
+    entity_data: dict
+    relevance_score: Optional[float] = 0.0
+    risk_level: Optional[str] = "LOW"
+    tags: Optional[str] = None
+    user_id: Optional[int] = 1
+
+class SearchNotesRequest(BaseModel):
+    notes: str
+
+class StarredEntityNotesRequest(BaseModel):
+    notes: str
 
 @router.post("/entities")
 async def search_entities(request: SearchRequest, db: Session = Depends(get_db)) -> Dict[str, Any]:
@@ -80,18 +98,35 @@ async def search_entities(request: SearchRequest, db: Session = Depends(get_db))
                     enhanced_entity = enhance_entity_for_morocco(entity)
                     enhanced_results.append(enhanced_entity)
                 
+                # Add custom Moroccan entities
+                moroccan_matches = moroccan_entities_service.search_entities(
+                    request.query, 
+                    schema_filter=request.schema
+                )
+                
+                # Merge results, prioritizing by score
+                all_results = enhanced_results + moroccan_matches
+                all_results.sort(key=lambda x: x.get("score", 0), reverse=True)
+                
+                # Apply limit and offset to merged results
+                start_idx = request.offset
+                end_idx = start_idx + request.limit
+                paginated_results = all_results[start_idx:end_idx]
+                
                 response_data = {
-                    "results": enhanced_results,
-                    "total": opensanctions_data.get("total", {"value": len(enhanced_results)}),
+                    "results": paginated_results,
+                    "total": {"value": len(all_results)},
+                    "opensanctions_total": opensanctions_data.get("total", {"value": len(enhanced_results)}),
+                    "moroccan_matches": len(moroccan_matches),
                     "query": request.query,
                     "dataset": request.dataset,
-                    "source": "opensanctions",
+                    "source": "opensanctions+moroccan",
                     "api_url": f"{opensanctions_url}/search/{request.dataset}",
                     "status": "success"
                 }
                 
-                # Save search to history
-                await save_search_to_history(db, request, enhanced_results, "opensanctions")
+                # Save search to history (using all results)
+                await save_search_to_history(db, request, paginated_results, "opensanctions+moroccan")
                 
                 return response_data
                 
@@ -210,11 +245,11 @@ async def save_search_to_history(db: Session, request: SearchRequest, results: L
     """Save search results to history database"""
     try:
         # Calculate risk metrics
-        risk_scores = [r.get("morocco_risk_score", 0) for r in results]
-        avg_risk = sum(risk_scores) / len(risk_scores) if risk_scores else 0
-        max_risk = max(risk_scores) if risk_scores else 0
+        relevance_scores = [r.get("score", 0) * 100 if r.get("score") else 0 for r in results]
+        avg_relevance = sum(relevance_scores) / len(relevance_scores) if relevance_scores else 0
+        max_relevance = max(relevance_scores) if relevance_scores else 0
         
-        risk_level = "HIGH" if max_risk >= 80 else "MEDIUM" if max_risk >= 50 else "LOW"
+        risk_level = "HIGH" if max_relevance >= 80 else "MEDIUM" if max_relevance >= 50 else "LOW"
         
         # Determine search type
         search_type = determine_search_type(request.query)
@@ -225,7 +260,7 @@ async def save_search_to_history(db: Session, request: SearchRequest, results: L
             search_type=search_type,
             results_count=len(results),
             risk_level=risk_level,
-            risk_score=avg_risk,
+            relevance_score=avg_relevance,
             data_source=source,
             results_data=results,  # Store full results for later reference
             user_id=1  # Default user for now
@@ -251,20 +286,46 @@ def determine_search_type(query: str) -> str:
     return "Person"
 
 def generate_fallback_response(request: SearchRequest, error_info: Dict[str, Any]) -> Dict[str, Any]:
-    """Generate fallback response with mock data and error information"""
+    """Generate fallback response with Moroccan entities and mock data"""
     
-    mock_entities = generate_mock_results(request.query)
+    # Always try to get Moroccan entities first
+    moroccan_matches = moroccan_entities_service.search_entities(
+        request.query, 
+        schema_filter=request.schema
+    )
+    
+    # If no Moroccan matches, use mock data
+    if not moroccan_matches:
+        mock_entities = generate_mock_results(request.query)
+        all_results = mock_entities
+        source = "mock"
+    else:
+        # Use Moroccan entities as primary results
+        all_results = moroccan_matches
+        source = "moroccan"
+        
+        # Optionally add some mock results to pad if needed
+        if len(moroccan_matches) < request.limit:
+            mock_entities = generate_mock_results(request.query)
+            all_results.extend(mock_entities[:request.limit - len(moroccan_matches)])
+            source = "moroccan+mock"
+    
+    # Apply pagination
+    start_idx = request.offset
+    end_idx = start_idx + request.limit
+    paginated_results = all_results[start_idx:end_idx]
     
     return {
-        "results": mock_entities,
-        "total": {"value": len(mock_entities)},
+        "results": paginated_results,
+        "total": {"value": len(all_results)},
+        "moroccan_matches": len(moroccan_matches),
         "query": request.query,
         "dataset": request.dataset,
-        "source": "mock",
+        "source": source,
         "status": "fallback",
         "opensanctions_status": error_info["status"],
         "opensanctions_message": error_info["message"],
-        "note": f"Using mock data - OpenSanctions {error_info['status']}",
+        "note": f"Using {source} data - OpenSanctions {error_info['status']}",
         "error": error_info["message"],
         "http_status": error_info.get("http_status"),
         "troubleshooting": get_troubleshooting_tips(error_info["status"])
@@ -327,7 +388,7 @@ async def get_search_history(
                 "search_type": search.search_type,
                 "results_count": search.results_count,
                 "risk_level": search.risk_level,
-                "risk_score": search.risk_score,
+                "relevance_score": search.relevance_score,
                 "created_at": search.created_at.isoformat(),
                 "data_source": search.data_source,
                 "execution_time_ms": search.execution_time_ms,
@@ -456,7 +517,7 @@ async def get_search_details(history_id: int, db: Session = Depends(get_db)) -> 
                 "search_type": search_history.search_type,
                 "results_count": search_history.results_count,
                 "risk_level": search_history.risk_level,
-                "risk_score": search_history.risk_score,
+                "relevance_score": search_history.relevance_score,
                 "data_source": search_history.data_source,
                 "created_at": search_history.created_at.isoformat(),
                 "results_data": search_history.results_data or []
@@ -471,31 +532,305 @@ async def get_search_details(history_id: int, db: Session = Depends(get_db)) -> 
         logger.error(f"Failed to get search details: {e}")
         raise HTTPException(status_code=500, detail="Failed to retrieve search details")
 
-@router.put("/history/{history_id}/star")
-async def toggle_star_search(history_id: int, db: Session = Depends(get_db)) -> Dict[str, Any]:
-    """Toggle star status of a search"""
+
+@router.post("/entities/star")
+async def star_entity(request: StarEntityRequest, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    """Star an individual entity from search results"""
+    
     try:
-        search_history = db.query(SearchHistory).filter(SearchHistory.id == history_id).first()
+        # Check if entity is already starred in this search
+        existing = db.query(StarredEntity).filter(
+            StarredEntity.entity_id == request.entity_id,
+            StarredEntity.search_history_id == request.search_history_id
+        ).first()
+        
+        if existing:
+            return {
+                "id": existing.id,
+                "entity_id": existing.entity_id,
+                "already_starred": True,
+                "message": "Entity is already starred"
+            }
+        
+        # Verify search history exists
+        search_history = db.query(SearchHistory).filter(SearchHistory.id == request.search_history_id).first()
         if not search_history:
             raise HTTPException(status_code=404, detail="Search history not found")
         
-        # Toggle starred status
-        search_history.is_starred = not getattr(search_history, 'is_starred', False)
+        # Create starred entity
+        starred_entity = StarredEntity(
+            search_history_id=request.search_history_id,
+            entity_id=request.entity_id,
+            entity_name=request.entity_name,
+            entity_data=request.entity_data,
+            relevance_score=request.relevance_score,
+            risk_level=request.risk_level,
+            tags=request.tags,
+            user_id=request.user_id
+        )
+        
+        db.add(starred_entity)
         db.commit()
-        db.refresh(search_history)
+        db.refresh(starred_entity)
         
         return {
-            "id": search_history.id,
-            "is_starred": search_history.is_starred,
-            "message": "Starred" if search_history.is_starred else "Unstarred"
+            "id": starred_entity.id,
+            "entity_id": starred_entity.entity_id,
+            "entity_name": starred_entity.entity_name,
+            "starred": True,
+            "message": "Entity starred successfully"
         }
         
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to toggle star: {e}")
+        logger.error(f"Failed to star entity: {e}")
         db.rollback()
-        raise HTTPException(status_code=500, detail="Failed to update star status")
+        raise HTTPException(status_code=500, detail="Failed to star entity")
+
+@router.delete("/entities/star/{entity_id}/search/{search_history_id}")
+async def unstar_entity(
+    entity_id: str, 
+    search_history_id: int, 
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Remove star from an entity"""
+    
+    try:
+        starred_entity = db.query(StarredEntity).filter(
+            StarredEntity.entity_id == entity_id,
+            StarredEntity.search_history_id == search_history_id
+        ).first()
+        
+        if not starred_entity:
+            raise HTTPException(status_code=404, detail="Starred entity not found")
+        
+        db.delete(starred_entity)
+        db.commit()
+        
+        return {
+            "entity_id": entity_id,
+            "starred": False,
+            "message": "Entity unstarred successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to unstar entity: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to unstar entity")
+
+@router.get("/entities/starred")
+async def get_starred_entities(
+    limit: int = 50, 
+    offset: int = 0, 
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Get all starred entities with search context"""
+    
+    try:
+        from sqlalchemy.orm import joinedload
+        
+        total = db.query(StarredEntity).count()
+        starred_entities = db.query(StarredEntity)\
+            .options(joinedload(StarredEntity.search_history))\
+            .order_by(StarredEntity.starred_at.desc())\
+            .offset(offset)\
+            .limit(limit)\
+            .all()
+        
+        items = [
+            {
+                "id": entity.id,
+                "entity_id": entity.entity_id,
+                "entity_name": entity.entity_name,
+                "entity_data": entity.entity_data,
+                "relevance_score": entity.relevance_score,
+                "risk_level": entity.risk_level,
+                "tags": entity.tags,
+                "notes": entity.notes,  # Include starred entity notes
+                "starred_at": entity.starred_at.isoformat(),
+                "search_context": {
+                    "search_id": entity.search_history.id,
+                    "query": entity.search_history.query,
+                    "search_type": entity.search_history.search_type,
+                    "created_at": entity.search_history.created_at.isoformat(),
+                    "data_source": entity.search_history.data_source
+                }
+            }
+            for entity in starred_entities
+        ]
+        
+        return {
+            "items": items,
+            "total": total,
+            "page": (offset // limit) + 1,
+            "pages": (total + limit - 1) // limit,
+            "limit": limit,
+            "offset": offset
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get starred entities: {e}")
+        return {
+            "items": [],
+            "total": 0,
+            "page": 1,
+            "pages": 0,
+            "limit": limit,
+            "offset": offset,
+            "error": str(e)
+        }
+
+@router.get("/entities/starred/search/{search_history_id}")
+async def get_starred_entities_for_search(
+    search_history_id: int, 
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Get starred entities for a specific search"""
+    
+    try:
+        starred_entities = db.query(StarredEntity)\
+            .filter(StarredEntity.search_history_id == search_history_id)\
+            .all()
+        
+        # Return a set of entity_ids for quick lookup
+        starred_entity_ids = {entity.entity_id for entity in starred_entities}
+        
+        return {
+            "search_id": search_history_id,
+            "starred_entity_ids": list(starred_entity_ids),
+            "count": len(starred_entity_ids)
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to get starred entities for search: {e}")
+        return {
+            "search_id": search_history_id,
+            "starred_entity_ids": [],
+            "count": 0,
+            "error": str(e)
+        }
+
+@router.put("/entities/star/{starred_entity_id}/notes")
+async def update_starred_entity_notes(
+    starred_entity_id: int,
+    request: StarredEntityNotesRequest,
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Add or update notes for a starred entity"""
+    
+    try:
+        # Check if starred entity exists
+        starred_entity = db.query(StarredEntity).filter(StarredEntity.id == starred_entity_id).first()
+        if not starred_entity:
+            raise HTTPException(status_code=404, detail="Starred entity not found")
+        
+        # Update starred entity with notes
+        starred_entity.notes = request.notes
+        db.commit()
+        
+        return {
+            "success": True,
+            "message": "Notes updated successfully",
+            "starred_entity_id": starred_entity_id,
+            "entity_name": starred_entity.entity_name,
+            "notes": request.notes
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update starred entity notes: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to update notes")
+
+@router.get("/reports/starred-entities")
+async def generate_starred_entities_report(
+    format: str = "json",
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Generate comprehensive report of all starred entities"""
+    
+    try:
+        from datetime import datetime
+        from sqlalchemy.orm import joinedload
+        
+        # Get all starred entities with search context
+        starred_entities = db.query(StarredEntity)\
+            .options(joinedload(StarredEntity.search_history))\
+            .order_by(StarredEntity.starred_at.desc())\
+            .all()
+        
+        # Compile report data
+        report_items = []
+        risk_distribution = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
+        
+        for entity in starred_entities:
+            risk_distribution[entity.risk_level] += 1
+            
+            # Get notes for this entity
+            entity_notes = db.query(SearchNote)\
+                .filter(
+                    SearchNote.search_history_id == entity.search_history_id,
+                    SearchNote.entity_id == entity.entity_id
+                )\
+                .all()
+            
+            notes_data = [
+                {
+                    "note_text": note.note_text,
+                    "risk_assessment": note.risk_assessment,
+                    "action_taken": note.action_taken,
+                    "created_at": note.created_at.isoformat()
+                }
+                for note in entity_notes
+            ]
+            
+            report_items.append({
+                "starred_entity_id": entity.id,
+                "entity_id": entity.entity_id,
+                "entity_name": entity.entity_name,
+                "entity_data": entity.entity_data,
+                "relevance_score": entity.relevance_score,
+                "risk_level": entity.risk_level,
+                "tags": entity.tags,
+                "starred_at": entity.starred_at.isoformat(),
+                "search_context": {
+                    "search_id": entity.search_history.id,
+                    "query": entity.search_history.query,
+                    "search_type": entity.search_history.search_type,
+                    "created_at": entity.search_history.created_at.isoformat(),
+                    "data_source": entity.search_history.data_source
+                },
+                "notes": notes_data,
+                "notes_count": len(notes_data)
+            })
+        
+        # Generate summary
+        report_summary = {
+            "total_starred_entities": len(starred_entities),
+            "risk_distribution": risk_distribution,
+            "avg_risk_score": sum(e.risk_score or 0 for e in starred_entities) / len(starred_entities) if starred_entities else 0,
+            "date_range": {
+                "earliest": starred_entities[-1].starred_at.isoformat() if starred_entities else None,
+                "latest": starred_entities[0].starred_at.isoformat() if starred_entities else None
+            },
+            "report_generated_at": datetime.utcnow().isoformat()
+        }
+        
+        return {
+            "report_type": "starred_entities_detailed",
+            "format": format,
+            "summary": report_summary,
+            "starred_entities": report_items,
+            "status": "success"
+        }
+        
+    except Exception as e:
+        logger.error(f"Failed to generate starred entities report: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate report")
 
 @router.get("/analytics")
 async def get_search_analytics(db: Session = Depends(get_db)) -> Dict[str, Any]:
@@ -506,7 +841,7 @@ async def get_search_analytics(db: Session = Depends(get_db)) -> Dict[str, Any]:
         
         # Basic stats
         total_searches = db.query(SearchHistory).count()
-        starred_searches = db.query(SearchHistory).filter(SearchHistory.is_starred == True).count()
+        starred_entities_count = db.query(StarredEntity).count()
         
         # Risk level distribution
         risk_stats = db.query(
@@ -545,7 +880,7 @@ async def get_search_analytics(db: Session = Depends(get_db)) -> Dict[str, Any]:
         return {
             "summary": {
                 "total_searches": total_searches,
-                "starred_searches": starred_searches,
+                "starred_entities": starred_entities_count,
                 "avg_risk_score": round(float(avg_risk_score), 2),
                 "avg_execution_time_ms": round(float(avg_execution_time), 2)
             },
@@ -574,7 +909,7 @@ async def get_search_analytics(db: Session = Depends(get_db)) -> Dict[str, Any]:
     except Exception as e:
         logger.error(f"Failed to get analytics: {e}")
         return {
-            "summary": {"total_searches": 0, "starred_searches": 0, "avg_risk_score": 0, "avg_execution_time_ms": 0},
+            "summary": {"total_searches": 0, "starred_entities": 0, "avg_risk_score": 0, "avg_execution_time_ms": 0},
             "risk_distribution": [],
             "data_sources": [],
             "recent_activity": [],
@@ -748,3 +1083,605 @@ def generate_mock_results(query: str) -> List[Dict[str, Any]]:
     ]
     
     return mock_entities
+
+# Enhanced Report Management Endpoints
+
+@router.delete("/history/{search_id}")
+async def delete_search_history(
+    search_id: int,
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Delete a search history entry and all associated data"""
+    
+    try:
+        # Check if search exists
+        search = db.query(SearchHistory).filter(SearchHistory.id == search_id).first()
+        if not search:
+            raise HTTPException(status_code=404, detail="Search not found")
+        
+        # Delete will cascade to starred_entities and search_notes due to foreign key constraints
+        db.delete(search)
+        db.commit()
+        
+        logger.info(f"Deleted search history: {search_id}")
+        return {
+            "success": True,
+            "message": f"Search {search_id} deleted successfully",
+            "deleted_search_id": search_id
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete search: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to delete search")
+
+@router.put("/history/{search_id}/notes")
+async def update_search_notes(
+    search_id: int,
+    request: SearchNotesRequest,
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Add or update notes for a search history entry"""
+    
+    try:
+        # Check if search exists
+        search = db.query(SearchHistory).filter(SearchHistory.id == search_id).first()
+        if not search:
+            raise HTTPException(status_code=404, detail="Search not found")
+        
+        # Update search with notes
+        search.notes = request.notes
+        db.commit()
+        
+        return {
+            "success": True,
+            "message": "Notes updated successfully",
+            "search_id": search_id,
+            "notes": request.notes
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update search notes: {e}")
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to update notes")
+
+@router.get("/reports/starred-entities/enhanced")
+async def generate_enhanced_starred_report(
+    format: str = "json",
+    db: Session = Depends(get_db)
+) -> Dict[str, Any]:
+    """Generate enhanced report with full OpenSanctions details"""
+    
+    try:
+        from sqlalchemy.orm import joinedload
+        
+        # Get all starred entities with full context
+        starred_entities = db.query(StarredEntity)\
+            .options(joinedload(StarredEntity.search_history))\
+            .order_by(StarredEntity.starred_at.desc())\
+            .all()
+        
+        # Get all search history with full data
+        search_histories = db.query(SearchHistory)\
+            .order_by(SearchHistory.created_at.desc())\
+            .all()
+        
+        report_data = {
+            "report_metadata": {
+                "generated_at": datetime.now().isoformat(),
+                "total_starred_entities": len(starred_entities),
+                "total_searches": len(search_histories),
+                "report_type": "enhanced_starred_entities"
+            },
+            "starred_entities": [],
+            "search_histories": [],
+            "risk_analysis": {
+                "risk_distribution": {"HIGH": 0, "MEDIUM": 0, "LOW": 0},
+                "average_risk_score": 0,
+                "highest_risk_entity": None
+            }
+        }
+        
+        highest_risk_score = 0
+        total_risk_score = 0
+        
+        # Process starred entities with full details
+        for entity in starred_entities:
+            risk_level = entity.risk_level or "LOW"
+            report_data["risk_analysis"]["risk_distribution"][risk_level] += 1
+            
+            risk_score = entity.risk_score or 0
+            total_risk_score += risk_score
+            
+            if risk_score > highest_risk_score:
+                highest_risk_score = risk_score
+                report_data["risk_analysis"]["highest_risk_entity"] = {
+                    "entity_id": entity.entity_id,
+                    "entity_name": entity.entity_name,
+                    "risk_score": risk_score
+                }
+            
+            # Get all notes for this entity
+            entity_notes = db.query(SearchNote)\
+                .filter(
+                    SearchNote.search_history_id == entity.search_history_id,
+                    SearchNote.entity_id == entity.entity_id
+                )\
+                .all()
+            
+            # Extract and structure comprehensive entity information
+            entity_info = entity.entity_data or {}
+            properties = entity_info.get('properties', {})
+            
+            # Structure the entity data with all important OpenSanctions information
+            entity_data = {
+                "id": entity.id,
+                "entity_id": entity.entity_id,
+                "entity_name": entity.entity_name,
+                "relevance_score": entity.relevance_score,
+                "risk_level": entity.risk_level,
+                "tags": entity.tags,
+                "starred_at": entity.starred_at.isoformat(),
+                "search_context": {
+                    "search_id": entity.search_history_id,
+                    "query": entity.search_history.query,
+                    "search_date": entity.search_history.created_at.isoformat(),
+                    "data_source": entity.search_history.data_source,
+                    "notes": getattr(entity.search_history, 'notes', None)
+                },
+                "entity_details": {
+                    "schema": entity_info.get('schema'),
+                    "personal_information": {
+                        "birth_date": properties.get('birthDate', []),
+                        "birth_place": properties.get('birthPlace', []),
+                        "birth_country": properties.get('birthCountry', []),
+                        "gender": properties.get('gender', []),
+                        "nationality": properties.get('nationality', []),
+                        "citizenship": properties.get('citizenship', []),
+                        "ethnicity": properties.get('ethnicity', []),
+                        "religion": properties.get('religion', [])
+                    },
+                    "identification": {
+                        "names": properties.get('name', []),
+                        "aliases": properties.get('alias', []),
+                        "weak_aliases": properties.get('weakAlias', []),
+                        "first_name": properties.get('firstName', []),
+                        "last_name": properties.get('lastName', []),
+                        "father_name": properties.get('fatherName', []),
+                        "middle_name": properties.get('middleName', []),
+                        "second_name": properties.get('secondName', []),
+                        "tax_number": properties.get('taxNumber', []),
+                        "wikidata_id": properties.get('wikidataId', []),
+                        "unique_entity_id": properties.get('uniqueEntityId', [])
+                    },
+                    "professional_information": {
+                        "classification": properties.get('classification', []),
+                        "positions": properties.get('position', []),
+                        "titles": properties.get('title', []),
+                        "education": properties.get('education', [])
+                    },
+                    "location_and_contact": {
+                        "countries": properties.get('country', []),
+                        "addresses": properties.get('address', []),
+                        "websites": properties.get('website', []),
+                        "source_urls": properties.get('sourceUrl', [])
+                    },
+                    "sanctions_information": {
+                        "topics": properties.get('topics', []),
+                        "descriptions": properties.get('description', []),
+                        "opensanctions_notes": properties.get('notes', []),
+                        "created_at": properties.get('createdAt', []),
+                        "modified_at": properties.get('modifiedAt', [])
+                    }
+                },
+                "full_raw_data": entity.entity_data,  # Complete original OpenSanctions data
+                "starred_entity_notes": entity.notes,  # Direct notes on the starred entity
+                "compliance_notes": [
+                    {
+                        "note_text": note.note_text,
+                        "risk_assessment": note.risk_assessment,
+                        "action_taken": note.action_taken,
+                        "created_at": note.created_at.isoformat()
+                    } for note in entity_notes
+                ]
+            }
+            
+            report_data["starred_entities"].append(entity_data)
+        
+        # Calculate average risk score
+        if len(starred_entities) > 0:
+            report_data["risk_analysis"]["average_risk_score"] = total_risk_score / len(starred_entities)
+        
+        # Process search histories with full results data
+        for search in search_histories:
+            search_data = {
+                "id": search.id,
+                "query": search.query,
+                "search_type": search.search_type,
+                "results_count": search.results_count,
+                "risk_level": search.risk_level,
+                "relevance_score": search.relevance_score,
+                "data_source": search.data_source,
+                "execution_time_ms": search.execution_time_ms,
+                "created_at": search.created_at.isoformat(),
+                "notes": getattr(search, 'notes', None),
+                "full_results_data": search.results_data  # Complete search results
+            }
+            
+            report_data["search_histories"].append(search_data)
+        
+        return report_data
+        
+    except Exception as e:
+        logger.error(f"Failed to generate enhanced report: {e}")
+        raise HTTPException(status_code=500, detail="Failed to generate enhanced report")
+
+@router.get("/reports/starred-entities/csv")
+async def export_starred_entities_csv(db: Session = Depends(get_db)):
+    """Export starred entities report as CSV"""
+    
+    try:
+        from fastapi.responses import StreamingResponse
+        import csv
+        import io
+        from sqlalchemy.orm import joinedload
+        
+        # Get starred entities
+        starred_entities = db.query(StarredEntity)\
+            .options(joinedload(StarredEntity.search_history))\
+            .order_by(StarredEntity.starred_at.desc())\
+            .all()
+        
+        # Create CSV in memory
+        output = io.StringIO()
+        writer = csv.writer(output)
+        
+        # Write comprehensive headers
+        writer.writerow([
+            'Entity ID', 'Entity Name', 'Risk Score', 'Risk Level', 'Tags',
+            'Search Query', 'Search Date', 'Data Source', 'Starred Date',
+            'Entity Type', 'Countries', 'Birth Country', 'Nationality', 'Citizenship',
+            'Birth Date', 'Birth Place', 'Gender', 'Classification', 
+            'Current Positions', 'All Names/Aliases', 'First Name', 'Last Name', 'Father Name',
+            'Topics', 'Source URLs', 'Address', 'Tax Number', 'Title',
+            'Education', 'Religion', 'Ethnicity', 'Website', 'Wikidata ID',
+            'Description', 'Notes from OpenSanctions', 'Starred Entity Notes', 'Notes Count', 'Created At', 'Modified At'
+        ])
+        
+        # Write data rows with all available information
+        for entity in starred_entities:
+            # Extract comprehensive data from entity_data
+            entity_info = entity.entity_data or {}
+            properties = entity_info.get('properties', {})
+            
+            # Basic entity information
+            entity_type = entity_info.get('schema', '')
+            countries = '; '.join(properties.get('country', []))
+            birth_country = '; '.join(properties.get('birthCountry', []))
+            nationality = '; '.join(properties.get('nationality', []))
+            citizenship = '; '.join(properties.get('citizenship', []))
+            
+            # Personal information
+            birth_date = '; '.join(properties.get('birthDate', []))
+            birth_place = '; '.join(properties.get('birthPlace', []))
+            gender = '; '.join(properties.get('gender', []))
+            classification = '; '.join(properties.get('classification', []))
+            
+            # Names and identification
+            all_names = '; '.join(properties.get('name', []) + properties.get('alias', []) + properties.get('weakAlias', []))
+            first_name = '; '.join(properties.get('firstName', []))
+            last_name = '; '.join(properties.get('lastName', []))
+            father_name = '; '.join(properties.get('fatherName', []))
+            
+            # Professional and political information
+            positions = '; '.join(properties.get('position', []))
+            
+            # Contact and location information
+            topics = '; '.join(properties.get('topics', []))
+            source_urls = '; '.join(properties.get('sourceUrl', []))
+            addresses = '; '.join(properties.get('address', []))
+            tax_number = '; '.join(properties.get('taxNumber', []))
+            titles = '; '.join(properties.get('title', []))
+            
+            # Additional information
+            education = '; '.join(properties.get('education', []))
+            religion = '; '.join(properties.get('religion', []))
+            ethnicity = '; '.join(properties.get('ethnicity', []))
+            website = '; '.join(properties.get('website', []))
+            wikidata_id = '; '.join(properties.get('wikidataId', []))
+            
+            # OpenSanctions metadata
+            description = '; '.join(properties.get('description', []))
+            os_notes = '; '.join(properties.get('notes', []))
+            created_at = '; '.join(properties.get('createdAt', []))
+            modified_at = '; '.join(properties.get('modifiedAt', []))
+            
+            # Count notes
+            notes_count = db.query(SearchNote).filter(
+                SearchNote.search_history_id == entity.search_history_id,
+                SearchNote.entity_id == entity.entity_id
+            ).count()
+            
+            writer.writerow([
+                entity.entity_id,
+                entity.entity_name,
+                entity.risk_score or 0,
+                entity.risk_level or 'LOW',
+                entity.tags or '',
+                entity.search_history.query,
+                entity.search_history.created_at.strftime('%Y-%m-%d %H:%M:%S'),
+                entity.search_history.data_source,
+                entity.starred_at.strftime('%Y-%m-%d %H:%M:%S'),
+                entity_type,
+                countries,
+                birth_country,
+                nationality,
+                citizenship,
+                birth_date,
+                birth_place,
+                gender,
+                classification,
+                positions,
+                all_names,
+                first_name,
+                last_name,
+                father_name,
+                topics,
+                source_urls,
+                addresses,
+                tax_number,
+                titles,
+                education,
+                religion,
+                ethnicity,
+                website,
+                wikidata_id,
+                description,
+                os_notes,
+                entity.notes or '',  # Starred entity notes
+                notes_count,
+                created_at,
+                modified_at
+            ])
+        
+        output.seek(0)
+        
+        return StreamingResponse(
+            io.BytesIO(output.getvalue().encode()),
+            media_type="text/csv",
+            headers={"Content-Disposition": "attachment; filename=starred_entities_report.csv"}
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to export CSV: {e}")
+        raise HTTPException(status_code=500, detail="Failed to export CSV")
+
+@router.get("/reports/starred-entities/pdf")
+async def export_starred_entities_pdf(db: Session = Depends(get_db)):
+    """Export starred entities report as PDF"""
+    
+    try:
+        from fastapi.responses import StreamingResponse
+        from reportlab.lib.pagesizes import letter, A4
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.units import inch
+        from reportlab.lib import colors
+        from sqlalchemy.orm import joinedload
+        import io
+        
+        # Get starred entities
+        starred_entities = db.query(StarredEntity)\
+            .options(joinedload(StarredEntity.search_history))\
+            .order_by(StarredEntity.starred_at.desc())\
+            .all()
+        
+        # Create PDF in memory
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=A4)
+        styles = getSampleStyleSheet()
+        story = []
+        
+        # Title
+        title_style = ParagraphStyle(
+            'CustomTitle',
+            parent=styles['Heading1'],
+            fontSize=20,
+            spaceAfter=30,
+            alignment=1  # Center alignment
+        )
+        story.append(Paragraph("Sanctions Screening Report", title_style))
+        story.append(Spacer(1, 20))
+        
+        # Summary
+        summary_data = [
+            ['Report Generated:', datetime.now().strftime('%Y-%m-%d %H:%M:%S')],
+            ['Total Starred Entities:', str(len(starred_entities))],
+            ['Risk Distribution:', '']
+        ]
+        
+        risk_dist = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
+        for entity in starred_entities:
+            risk_dist[entity.risk_level or "LOW"] += 1
+        
+        for risk_level, count in risk_dist.items():
+            summary_data.append([f'  {risk_level} Risk:', str(count)])
+        
+        summary_table = Table(summary_data, colWidths=[3*inch, 2*inch])
+        summary_table.setStyle(TableStyle([
+            ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+            ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
+            ('FONTSIZE', (0, 0), (-1, -1), 10),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ]))
+        story.append(summary_table)
+        story.append(Spacer(1, 30))
+        
+        # Starred entities details
+        if starred_entities:
+            story.append(Paragraph("Starred Entities Details", styles['Heading2']))
+            story.append(Spacer(1, 15))
+            
+            for entity in starred_entities:
+                # Entity header
+                entity_title = f"{entity.entity_name} ({entity.entity_id})"
+                story.append(Paragraph(entity_title, styles['Heading3']))
+                
+                # Comprehensive entity details
+                entity_info = entity.entity_data or {}
+                properties = entity_info.get('properties', {})
+                
+                # Basic information
+                entity_details = [
+                    ['Risk Score:', f"{entity.risk_score or 0}%"],
+                    ['Risk Level:', entity.risk_level or 'LOW'],
+                    ['Entity Type:', entity_info.get('schema', 'Unknown')],
+                    ['Search Query:', entity.search_history.query],
+                    ['Search Date:', entity.search_history.created_at.strftime('%Y-%m-%d')],
+                    ['Starred Date:', entity.starred_at.strftime('%Y-%m-%d')],
+                ]
+                
+                if entity.tags:
+                    entity_details.append(['Tags:', entity.tags])
+                
+                # Personal information
+                if properties.get('birthDate'):
+                    entity_details.append(['Birth Date:', ', '.join(properties.get('birthDate', []))])
+                if properties.get('birthPlace'):
+                    entity_details.append(['Birth Place:', ', '.join(properties.get('birthPlace', []))])
+                if properties.get('gender'):
+                    entity_details.append(['Gender:', ', '.join(properties.get('gender', []))])
+                if properties.get('nationality'):
+                    entity_details.append(['Nationality:', ', '.join(properties.get('nationality', []))])
+                if properties.get('citizenship'):
+                    entity_details.append(['Citizenship:', ', '.join(properties.get('citizenship', []))])
+                
+                # Names
+                if properties.get('firstName'):
+                    entity_details.append(['First Name:', ', '.join(properties.get('firstName', []))])
+                if properties.get('lastName'):
+                    entity_details.append(['Last Name:', ', '.join(properties.get('lastName', []))])
+                if properties.get('fatherName'):
+                    entity_details.append(['Father Name:', ', '.join(properties.get('fatherName', []))])
+                
+                # Location and identification
+                if properties.get('country'):
+                    entity_details.append(['Countries:', ', '.join(properties.get('country', []))])
+                if properties.get('address'):
+                    entity_details.append(['Address:', ', '.join(properties.get('address', [])[:3])])  # Limit to first 3 addresses
+                if properties.get('taxNumber'):
+                    entity_details.append(['Tax Number:', ', '.join(properties.get('taxNumber', []))])
+                if properties.get('wikidataId'):
+                    entity_details.append(['Wikidata ID:', ', '.join(properties.get('wikidataId', []))])
+                
+                # Professional information
+                if properties.get('classification'):
+                    entity_details.append(['Classification:', ', '.join(properties.get('classification', []))])
+                if properties.get('topics'):
+                    entity_details.append(['Topics:', ', '.join(properties.get('topics', []))])
+                if properties.get('title'):
+                    entity_details.append(['Title:', ', '.join(properties.get('title', []))])
+                
+                # Additional information
+                if properties.get('education'):
+                    entity_details.append(['Education:', ', '.join(properties.get('education', [])[:2])])  # Limit to first 2
+                if properties.get('religion'):
+                    entity_details.append(['Religion:', ', '.join(properties.get('religion', []))])
+                if properties.get('ethnicity'):
+                    entity_details.append(['Ethnicity:', ', '.join(properties.get('ethnicity', []))])
+                if properties.get('website'):
+                    entity_details.append(['Website:', ', '.join(properties.get('website', []))])
+                
+                detail_table = Table(entity_details, colWidths=[2*inch, 4*inch])
+                detail_table.setStyle(TableStyle([
+                    ('ALIGN', (0, 0), (-1, -1), 'LEFT'),
+                    ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
+                    ('FONTSIZE', (0, 0), (-1, -1), 9),
+                    ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.lightgrey),
+                ]))
+                story.append(detail_table)
+                
+                # Positions section
+                positions = properties.get('position', [])
+                if positions:
+                    story.append(Spacer(1, 10))
+                    story.append(Paragraph("Positions Held:", styles['Heading4']))
+                    for i, position in enumerate(positions[:5]):  # Limit to first 5 positions
+                        story.append(Paragraph(f"• {position}", styles['Normal']))
+                    if len(positions) > 5:
+                        story.append(Paragraph(f"... and {len(positions) - 5} more positions", styles['Normal']))
+                
+                # All names/aliases section
+                all_names = properties.get('name', []) + properties.get('alias', [])
+                if all_names and len(all_names) > 1:
+                    story.append(Spacer(1, 10))
+                    story.append(Paragraph("Known Names and Aliases:", styles['Heading4']))
+                    for i, name in enumerate(all_names[:10]):  # Limit to first 10 names
+                        story.append(Paragraph(f"• {name}", styles['Normal']))
+                    if len(all_names) > 10:
+                        story.append(Paragraph(f"... and {len(all_names) - 10} more names", styles['Normal']))
+                
+                # OpenSanctions descriptions and notes
+                descriptions = properties.get('description', [])
+                os_notes = properties.get('notes', [])
+                if descriptions or os_notes:
+                    story.append(Spacer(1, 10))
+                    story.append(Paragraph("OpenSanctions Information:", styles['Heading4']))
+                    
+                    if descriptions:
+                        story.append(Paragraph("Description:", styles['Heading5']))
+                        for desc in descriptions[:2]:  # Limit to first 2 descriptions
+                            story.append(Paragraph(f"• {desc}", styles['Normal']))
+                    
+                    if os_notes:
+                        story.append(Paragraph("Additional Notes:", styles['Heading5']))
+                        for note in os_notes[:3]:  # Limit to first 3 notes
+                            # Truncate very long notes
+                            truncated_note = note[:500] + "..." if len(note) > 500 else note
+                            story.append(Paragraph(f"• {truncated_note}", styles['Normal']))
+                
+                # Starred Entity Notes
+                if entity.notes:
+                    story.append(Spacer(1, 10))
+                    story.append(Paragraph("Compliance Notes:", styles['Heading4']))
+                    story.append(Paragraph(f"• {entity.notes}", styles['Normal']))
+                
+                # Additional Entity Notes (from search_notes table)
+                notes = db.query(SearchNote).filter(
+                    SearchNote.search_history_id == entity.search_history_id,
+                    SearchNote.entity_id == entity.entity_id
+                ).all()
+                
+                if notes:
+                    story.append(Spacer(1, 10))
+                    story.append(Paragraph("Additional Notes:", styles['Heading4']))
+                    for note in notes:
+                        note_text = f"• {note.note_text}"
+                        if note.risk_assessment:
+                            note_text += f" (Risk: {note.risk_assessment})"
+                        if note.action_taken:
+                            note_text += f" (Action: {note.action_taken})"
+                        story.append(Paragraph(note_text, styles['Normal']))
+                
+                story.append(Spacer(1, 20))
+        
+        # Build PDF
+        doc.build(story)
+        buffer.seek(0)
+        
+        return StreamingResponse(
+            buffer,
+            media_type="application/pdf",
+            headers={"Content-Disposition": "attachment; filename=starred_entities_report.pdf"}
+        )
+        
+    except Exception as e:
+        logger.error(f"Failed to export PDF: {e}")
+        raise HTTPException(status_code=500, detail=f"Failed to export PDF: {str(e)}")
+
+from datetime import datetime

@@ -42,4 +42,4 @@
 
 ## 🚀 Local Development
 
-For local development, access via: `http://localhost:3000`
+For local development, access via: `http://localhost:3001` (frontend dev server)

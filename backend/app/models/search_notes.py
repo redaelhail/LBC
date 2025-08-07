@@ -18,5 +18,5 @@ class SearchNote(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     
     # Relationships
-    search_history = relationship("SearchHistory", back_populates="notes")
+    search_history = relationship("SearchHistory", back_populates="search_notes")
     user = relationship("User")

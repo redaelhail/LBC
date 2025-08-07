@@ -17,3 +17,4 @@ class User(Base):
     
     # Relationships
     search_history = relationship("SearchHistory", back_populates="user")
+    starred_entities = relationship("StarredEntity", back_populates="user")

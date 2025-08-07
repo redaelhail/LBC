@@ -40,3 +40,6 @@ tmp/
 # Backup files
 *.bak
 *.backup
+
+# Custom datasets (may contain sensitive data)
+custom-datasets/

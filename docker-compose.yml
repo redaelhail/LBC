@@ -29,9 +29,9 @@ services:
       retries: 5
       start_period: 60s
 
-  # OpenSanctions Yente API
+  # OpenSanctions Yente API with Custom Moroccan Dataset
   opensanctions-api:
-    image: ghcr.io/opensanctions/yente:4.3.1
+    build: ./custom-datasets
     container_name: opensanctions-api
     depends_on:
       opensanctions-index:
@@ -42,6 +42,10 @@ services:
       YENTE_INDEX_TYPE: "elasticsearch"
       YENTE_INDEX_URL: http://opensanctions-index:9200
       YENTE_UPDATE_TOKEN: ""
+      YENTE_MANIFEST_PATH: "/datasets/manifest.yml"
+      YENTE_DATASET_PATH: "/datasets"
+    volumes:
+      - ./custom-datasets:/datasets
     networks:
       - sanctionsguard-network
     healthcheck:
@@ -101,7 +105,7 @@ services:
     environment:
       - DATABASE_URL=postgresql://sanctionsguard:${POSTGRES_PASSWORD:-secure_password_123}@postgres:5432/sanctionsguard
       - REDIS_URL=redis://redis:6379
-      - CORS_ORIGINS=["http://localhost:3000","http://192.168.0.114:3000","https://simple-sanctionsguard.loca.lt"]
+      - CORS_ORIGINS=["http://localhost:3000","http://127.0.0.1:3000"]
       - OPENSANCTIONS_BASE_URL=http://opensanctions-api:8000
       - OPENSANCTIONS_EXTERNAL_URL=http://localhost:9000  # For frontend proxy
     ports:
@@ -115,6 +119,7 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app
+      - ./custom-datasets:/app/custom-datasets
     networks:
       - sanctionsguard-network
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload

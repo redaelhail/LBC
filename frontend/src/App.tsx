@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, memo } from 'react';
 import { Search, User, Building, AlertCircle, CheckCircle, Loader2, History, FileText, Globe, Calendar, Download, Eye, Plus, Edit, Trash2, Save, X, MessageSquare, Star, Filter, TrendingUp, BarChart3, Activity, Clock, Target, Shield } from 'lucide-react';
 
 // Move SearchInput outside the main component to prevent recreation
@@ -36,6 +36,65 @@ const SearchInput = React.memo(({
   );
 });
 
+// Isolated textarea component to prevent cursor jumping
+const NotesTextarea = memo(({ initialValue, onSave, onCancel, entityId }) => {
+  const [localValue, setLocalValue] = useState(initialValue || '');
+  const textareaRef = useRef(null);
+
+  useEffect(() => {
+    setLocalValue(initialValue || '');
+  }, [initialValue]);
+
+  useEffect(() => {
+    if (textareaRef.current) {
+      textareaRef.current.focus();
+    }
+  }, []);
+
+  const handleSave = () => {
+    onSave(entityId, localValue);
+  };
+
+  const handleCancel = () => {
+    onCancel();
+  };
+
+  return (
+    <div className="space-y-3">
+      <textarea
+        ref={textareaRef}
+        value={localValue}
+        onChange={(e) => setLocalValue(e.target.value)}
+        placeholder="Enter compliance notes, risk assessment, or regulatory observations..."
+        rows={4}
+        className="w-full p-3 border border-purple-300 rounded-lg text-sm focus:ring-2 focus:ring-purple-500 focus:border-purple-500 resize-none cursor-text"
+        style={{ caretColor: '#7c3aed' }}
+        spellCheck="true"
+      />
+      <div className="flex items-center gap-2">
+        <button
+          onClick={handleSave}
+          className="px-4 py-2 bg-purple-600 text-white text-sm rounded hover:bg-purple-700 transition-colors flex items-center gap-2"
+        >
+          <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+          </svg>
+          Save Notes
+        </button>
+        <button
+          onClick={handleCancel}
+          className="px-4 py-2 bg-gray-500 text-white text-sm rounded hover:bg-gray-600 transition-colors flex items-center gap-2"
+        >
+          <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+          </svg>
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+});
+
 const App = () => {
   // API Configuration - use relative URLs (proxied by Vite)
   const API_BASE_URL = '';
@@ -55,9 +114,13 @@ const App = () => {
   const [editingNote, setEditingNote] = useState(null);
   const [currentSearchId, setCurrentSearchId] = useState(null);
   const [showInlineNoteForm, setShowInlineNoteForm] = useState(null);
+  const [editingStarredNote, setEditingStarredNote] = useState(null); // ID of starred entity being edited
   const [analytics, setAnalytics] = useState(null);
   const [historyFilter, setHistoryFilter] = useState('all'); // all, starred, high-risk, etc.
   const [expandedDetails, setExpandedDetails] = useState(new Set()); // Track which results have expanded details
+  const [starredEntities, setStarredEntities] = useState([]);
+  const [isLoadingStarred, setIsLoadingStarred] = useState(false);
+  const [starredEntityIds, setStarredEntityIds] = useState(new Set());
   
   // Refs to maintain focus
   const searchInputRef = useRef(null);
@@ -70,6 +133,9 @@ const App = () => {
     }
     if (activeTab === 'dashboard') {
       loadAnalytics();
+    }
+    if (activeTab === 'reports') {
+      loadStarredEntities();
     }
   }, [activeTab]);
 
@@ -85,17 +151,62 @@ const App = () => {
     }
   };
 
-  const toggleStar = async (searchId) => {
+  const starEntity = async (entity, index) => {
+    if (!currentSearchId) {
+      console.warn('⚠️ Cannot star entity: currentSearchId is not set');
+      return;
+    }
+    
+    const entityId = entity.id || `entity-${index}`;
+    
     try {
-      const response = await fetch(`${API_BASE_URL}/api/v1/search/history/${searchId}/star`, {
-        method: 'PUT'
+      const requestData = {
+        search_history_id: currentSearchId,
+        entity_id: entityId,
+        entity_name: entity.caption || entity.name || 'Unknown Entity',
+        entity_data: entity,
+        relevance_score: getRelevanceScore(entity),
+        risk_level: entity.risk_level || (getRelevanceScore(entity) >= 80 ? 'HIGH' : getRelevanceScore(entity) >= 50 ? 'MEDIUM' : 'LOW'),
+        user_id: 1
+      };
+      
+      const response = await fetch(`${API_BASE_URL}/api/v1/search/entities/star`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestData)
       });
+      
       if (response.ok) {
-        // Reload search history to reflect changes
-        loadSearchHistory();
+        const result = await response.json();
+        // Add to starred entity IDs
+        setStarredEntityIds(prev => new Set([...prev, entityId]));
+      } else {
+        const errorText = await response.text();
+        console.error('❌ Failed to star entity:', response.status, errorText);
       }
     } catch (error) {
-      console.error('Failed to toggle star:', error);
+      console.error('❌ Error starring entity:', error);
+    }
+  };
+
+  const unstarEntity = async (entityId) => {
+    if (!currentSearchId) return;
+    
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/v1/search/entities/star/${entityId}/search/${currentSearchId}`, {
+        method: 'DELETE'
+      });
+      
+      if (response.ok) {
+        // Remove from starred entity IDs
+        setStarredEntityIds(prev => {
+          const newSet = new Set(prev);
+          newSet.delete(entityId);
+          return newSet;
+        });
+      }
+    } catch (error) {
+      console.error('Failed to unstar entity:', error);
     }
   };
 
@@ -114,6 +225,182 @@ const App = () => {
     }
   };
 
+  const loadStarredEntities = async () => {
+    setIsLoadingStarred(true);
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/v1/search/entities/starred`);
+      if (response.ok) {
+        const data = await response.json();
+        setStarredEntities(data.items || []);
+      }
+    } catch (error) {
+      console.error('Failed to load starred entities:', error);
+    } finally {
+      setIsLoadingStarred(false);
+    }
+  };
+
+  const loadStarredEntityIdsForSearch = async (searchId) => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/v1/search/entities/starred/search/${searchId}`);
+      if (response.ok) {
+        const data = await response.json();
+        setStarredEntityIds(new Set(data.starred_entity_ids || []));
+      }
+    } catch (error) {
+      console.error('Failed to load starred entity IDs:', error);
+    }
+  };
+
+  const generateStarredReport = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/v1/search/reports/starred-entities`);
+      if (response.ok) {
+        const report = await response.json();
+        
+        // Create downloadable JSON file
+        const dataStr = JSON.stringify(report, null, 2);
+        const dataBlob = new Blob([dataStr], {type: 'application/json'});
+        const url = URL.createObjectURL(dataBlob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `starred-entities-report-${new Date().toISOString().split('T')[0]}.json`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+        
+        return report;
+      }
+    } catch (error) {
+      console.error('Failed to generate starred report:', error);
+    }
+  };
+
+  const exportStarredEntitiesCsv = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/v1/search/reports/starred-entities/csv`);
+      if (response.ok) {
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `starred-entities-report-${new Date().toISOString().split('T')[0]}.csv`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      }
+    } catch (error) {
+      console.error('Failed to export CSV report:', error);
+    }
+  };
+
+  const exportStarredEntitiesPdf = async () => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/v1/search/reports/starred-entities/pdf`);
+      if (response.ok) {
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `starred-entities-report-${new Date().toISOString().split('T')[0]}.pdf`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      }
+    } catch (error) {
+      console.error('Failed to export PDF report:', error);
+    }
+  };
+
+  const deleteSearchHistory = async (searchId) => {
+    if (!window.confirm('Are you sure you want to delete this search? This will also remove all associated starred entities and notes.')) {
+      return;
+    }
+    
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/v1/search/history/${searchId}`, {
+        method: 'DELETE'
+      });
+      
+      if (response.ok) {
+        // Remove from local state
+        setSearchHistory(prev => prev.filter(item => item.id !== searchId));
+      } else {
+        console.error('Failed to delete search');
+      }
+    } catch (error) {
+      console.error('Failed to delete search:', error);
+    }
+  };
+
+  const updateSearchNotes = async (searchId, notes) => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/v1/search/history/${searchId}/notes`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notes })
+      });
+      
+      if (response.ok) {
+        // Update local state
+        setSearchHistory(prev => prev.map(item => 
+          item.id === searchId ? { ...item, notes } : item
+        ));
+        return true;
+      } else {
+        console.error('Failed to update search notes');
+        return false;
+      }
+    } catch (error) {
+      console.error('Failed to update search notes:', error);
+      return false;
+    }
+  };
+
+  const updateStarredEntityNotes = async (starredEntityId, notes) => {
+    try {
+      const response = await fetch(`${API_BASE_URL}/api/v1/search/entities/star/${starredEntityId}/notes`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notes })
+      });
+      
+      if (response.ok) {
+        const result = await response.json();
+        // Update local state
+        setStarredEntities(prev => prev.map(entity => 
+          entity.id === starredEntityId ? { ...entity, notes } : entity
+        ));
+        return true;
+      } else {
+        console.error('Failed to update starred entity notes');
+        return false;
+      }
+    } catch (error) {
+      console.error('Failed to update starred entity notes:', error);
+      return false;
+    }
+  };
+
+  // Starred entity notes editing functions
+  const startEditingStarredNote = useCallback((entityId) => {
+    setEditingStarredNote(entityId);
+  }, []);
+
+  const cancelEditingStarredNote = useCallback(() => {
+    setEditingStarredNote(null);
+  }, []);
+
+  const saveStarredNote = async (entityId, noteText) => {
+    const success = await updateStarredEntityNotes(entityId, noteText);
+    if (success) {
+      setEditingStarredNote(null);
+    }
+  };
+
   const performSearch = useCallback(async (query) => {
     if (!query.trim()) {
       setError('Please enter a search term');
@@ -127,7 +414,6 @@ const App = () => {
     setSearchInfo(null);
     
     try {
-      console.log('🔍 Starting search for:', query);
       
       const requestBody = { 
         query: query,
@@ -144,8 +430,6 @@ const App = () => {
         body: JSON.stringify(requestBody),
       });
       
-      console.log('📥 Response status:', response.status);
-      
       const responseText = await response.text();
       
       if (!response.ok) {
@@ -153,14 +437,11 @@ const App = () => {
       }
       
       const data = JSON.parse(responseText);
-      console.log('📊 Parsed data:', data);
-      
       if (data.results && Array.isArray(data.results)) {
         setResults(data.results);
         setSearchInfo(data);
         // Try to get the search ID from the most recent history entry
         await loadCurrentSearchId(query);
-        console.log('✅ Search successful, found', data.results.length, 'results');
       } else {
         setResults([]);
         setSearchInfo(data);
@@ -191,10 +472,9 @@ const App = () => {
     }
   };
 
-  const getRiskScore = (result) => {
-    return result.morocco_risk_score || 
-           (result.score ? Math.round(result.score * 100) : 0) ||
-           result.risk_score || 0;
+  const getRelevanceScore = (result) => {
+    return result.score ? Math.round(result.score * 100) : 
+           result.relevance_score || 0;
   };
 
   const formatDate = (dateString) => {
@@ -249,17 +529,29 @@ const App = () => {
   };
 
   const loadCurrentSearchId = async (query) => {
-    try {
-      const response = await fetch(`${API_BASE_URL}/api/v1/search/history?limit=1`);
-      if (response.ok) {
-        const data = await response.json();
-        if (data.items && data.items.length > 0 && data.items[0].query === query) {
-          setCurrentSearchId(data.items[0].id);
+    // Add retry logic with delay to handle race conditions
+    for (let attempt = 0; attempt < 3; attempt++) {
+      try {
+        if (attempt > 0) {
+          await new Promise(resolve => setTimeout(resolve, 200)); // Wait 200ms between attempts
         }
+        
+        const response = await fetch(`${API_BASE_URL}/api/v1/search/history?limit=1`);
+        if (response.ok) {
+          const data = await response.json();
+          if (data.items && data.items.length > 0 && data.items[0].query === query) {
+            const searchId = data.items[0].id;
+            setCurrentSearchId(searchId);
+            // Load starred entities for this search
+            loadStarredEntityIdsForSearch(searchId);
+            return; // Success, exit retry loop
+          }
+        }
+      } catch (error) {
+        console.error(`Failed to get current search ID (attempt ${attempt + 1}):`, error);
       }
-    } catch (error) {
-      console.error('Failed to get current search ID:', error);
     }
+    console.warn('⚠️ Could not load current search ID after 3 attempts');
   };
 
   const addInlineNote = async (entityId, entityName, noteText, riskAssessment = '', actionTaken = '') => {
@@ -284,7 +576,6 @@ const App = () => {
         setShowInlineNoteForm(null);
         setNewNote({ entityId: '', entityName: '', text: '', riskAssessment: '', actionTaken: '' });
         // Show success message
-        console.log('Note added successfully');
       }
     } catch (error) {
       console.error('Failed to add note:', error);
@@ -340,9 +631,9 @@ const App = () => {
         <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-medium text-gray-600">Starred Searches</p>
-              <p className="text-3xl font-bold text-yellow-600">{analytics?.summary?.starred_searches || 0}</p>
-              <p className="text-xs text-gray-500 mt-1">Important cases</p>
+              <p className="text-sm font-medium text-gray-600">Starred Entities</p>
+              <p className="text-3xl font-bold text-yellow-600">{analytics?.summary?.starred_entities || 0}</p>
+              <p className="text-xs text-gray-500 mt-1">Important entities</p>
             </div>
             <div className="bg-yellow-100 p-3 rounded-full">
               <Star className="h-6 w-6 text-yellow-600" />
@@ -353,9 +644,9 @@ const App = () => {
         <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-sm font-medium text-gray-600">Avg Risk Score</p>
-              <p className="text-3xl font-bold text-orange-600">{analytics?.summary?.avg_risk_score || 0}%</p>
-              <p className="text-xs text-gray-500 mt-1">Risk assessment</p>
+              <p className="text-sm font-medium text-gray-600">Avg Relevance</p>
+              <p className="text-3xl font-bold text-orange-600">{analytics?.summary?.avg_relevance_score || 0}%</p>
+              <p className="text-xs text-gray-500 mt-1">Search relevance</p>
             </div>
             <div className="bg-orange-100 p-3 rounded-full">
               <Target className="h-6 w-6 text-orange-600" />
@@ -418,17 +709,17 @@ const App = () => {
                 <div key={source.source} className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
                     <span className={`px-2 py-1 rounded text-xs font-medium ${
-                      source.source === 'opensanctions' ? 'bg-green-100 text-green-800' :
+                      source.source?.includes('opensanctions') ? 'bg-green-100 text-green-800' :
                       'bg-gray-100 text-gray-800'
                     }`}>
-                      {source.source === 'opensanctions' ? 'Live Data' : 'Mock Data'}
+                      {source.source?.includes('opensanctions') ? 'Live Data' : 'Mock Data'}
                     </span>
                     <span className="text-sm text-gray-600">{source.count} searches</span>
                   </div>
                   <div className="w-32 bg-gray-200 rounded-full h-2">
                     <div 
                       className={`h-2 rounded-full ${
-                        source.source === 'opensanctions' ? 'bg-green-500' : 'bg-gray-500'
+                        source.source?.includes('opensanctions') ? 'bg-green-500' : 'bg-gray-500'
                       }`}
                       style={{ 
                         width: `${(source.count / analytics.summary.total_searches) * 100}%` 
@@ -532,34 +823,34 @@ const App = () => {
       {/* Data Source Info */}
       {searchInfo && (
         <div className={`border rounded-lg p-4 ${
-          searchInfo.source === 'opensanctions' 
+          searchInfo.source?.includes('opensanctions')
             ? 'bg-green-50 border-green-200' 
             : 'bg-yellow-50 border-yellow-200'
         }`}>
           <div className="flex items-center gap-2">
-            {searchInfo.source === 'opensanctions' ? (
+            {searchInfo.source?.includes('opensanctions') ? (
               <CheckCircle className="h-5 w-5 text-green-600" />
             ) : (
               <AlertCircle className="h-5 w-5 text-yellow-600" />
             )}
             <div>
               <h3 className={`font-medium ${
-                searchInfo.source === 'opensanctions' 
+                searchInfo.source?.includes('opensanctions')
                   ? 'text-green-800' 
                   : 'text-yellow-800'
               }`}>
-                {searchInfo.source === 'opensanctions' 
+                {searchInfo.source?.includes('opensanctions')
                   ? '🎉 Using Real OpenSanctions Data!' 
                   : '⏳ Using Demo Data'
                 }
               </h3>
               <p className={`text-sm ${
-                searchInfo.source === 'opensanctions' 
+                searchInfo.source?.includes('opensanctions')
                   ? 'text-green-700' 
                   : 'text-yellow-700'
               }`}>
-                {searchInfo.source === 'opensanctions' 
-                  ? `Found ${searchInfo.total?.value || 0} matches in live sanctions databases` 
+                {searchInfo.source?.includes('opensanctions')
+                  ? `Found ${searchInfo.total?.value || 0} matches in live sanctions databases${searchInfo.moroccan_matches > 0 ? ` (including ${searchInfo.moroccan_matches} Moroccan entities)` : ''}` 
                   : 'OpenSanctions is still loading - showing demo results'
                 }
               </p>
@@ -635,10 +926,33 @@ const App = () => {
                         <h4 className="text-lg font-semibold text-gray-900">
                           {result.caption || result.name || 'Unknown Entity'}
                         </h4>
+                        <button
+                          onClick={() => {
+                            const entityId = result.id || `entity-${index}`;
+                            if (starredEntityIds.has(entityId)) {
+                              unstarEntity(entityId);
+                            } else {
+                              starEntity(result, index);
+                            }
+                          }}
+                          className={`p-2 rounded-full transition-colors ${
+                            starredEntityIds.has(result.id || `entity-${index}`)
+                              ? 'text-yellow-600 bg-yellow-100 hover:bg-yellow-200'
+                              : 'text-gray-400 hover:text-yellow-500 hover:bg-yellow-50'
+                          }`}
+                          title={starredEntityIds.has(result.id || `entity-${index}`) ? 'Unstar this entity' : 'Star this important entity'}
+                        >
+                          <Star className={`h-5 w-5 ${starredEntityIds.has(result.id || `entity-${index}`) ? 'fill-current' : ''}`} />
+                        </button>
+                        {starredEntityIds.has(result.id || `entity-${index}`) && (
+                          <span className="px-2 py-1 bg-yellow-100 text-yellow-800 rounded text-xs font-medium border border-yellow-300">
+                            ⭐ Starred Entity
+                          </span>
+                        )}
                         <span className={`px-3 py-1 rounded-full text-sm font-medium border ${
-                          getRiskColor(getRiskScore(result))
+                          getRiskColor(getRelevanceScore(result))
                         }`}>
-                          Risk: {getRiskScore(result)}%
+                          Relevance: {getRelevanceScore(result)}%
                         </span>
                         <span className="px-3 py-1 bg-blue-100 text-blue-800 rounded-full text-sm font-medium">
                           {result.schema || 'Entity'}
@@ -647,6 +961,38 @@ const App = () => {
                       
                       {/* Basic Information Grid */}
                       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 text-sm mb-4">
+                        {result.properties?.birthDate && (
+                          <div>
+                            <span className="text-gray-600 font-medium">Birth Date:</span>
+                            <span className="ml-2">
+                              {new Date(result.properties.birthDate[0]).toLocaleDateString()}
+                            </span>
+                          </div>
+                        )}
+                        {result.properties?.birthPlace && (
+                          <div>
+                            <span className="text-gray-600 font-medium">Birth Place:</span>
+                            <span className="ml-2">
+                              {result.properties.birthPlace[0]}
+                            </span>
+                          </div>
+                        )}
+                        {result.properties?.gender && (
+                          <div>
+                            <span className="text-gray-600 font-medium">Gender:</span>
+                            <span className="ml-2 capitalize">
+                              {result.properties.gender[0]}
+                            </span>
+                          </div>
+                        )}
+                        {result.properties?.nationality && (
+                          <div>
+                            <span className="text-gray-600 font-medium">Nationality:</span>
+                            <span className="ml-2">
+                              {result.properties.nationality.join(', ').toUpperCase()}
+                            </span>
+                          </div>
+                        )}
                         {result.properties?.citizenship && (
                           <div>
                             <span className="text-gray-600 font-medium">Citizenship:</span>
@@ -663,14 +1009,6 @@ const App = () => {
                             </span>
                           </div>
                         )}
-                        {result.properties?.birthDate && (
-                          <div>
-                            <span className="text-gray-600 font-medium">Birth Date:</span>
-                            <span className="ml-2">
-                              {new Date(result.properties.birthDate[0]).toLocaleDateString()}
-                            </span>
-                          </div>
-                        )}
                         {result.properties?.deathDate && (
                           <div>
                             <span className="text-gray-600 font-medium">Death Date:</span>
@@ -681,11 +1019,19 @@ const App = () => {
                             </span>
                           </div>
                         )}
-                        {result.properties?.gender && (
+                        {result.properties?.title && (
                           <div>
-                            <span className="text-gray-600 font-medium">Gender:</span>
-                            <span className="ml-2 capitalize">
-                              {result.properties.gender[0]}
+                            <span className="text-gray-600 font-medium">Title:</span>
+                            <span className="ml-2">
+                              {result.properties.title.join(', ')}
+                            </span>
+                          </div>
+                        )}
+                        {result.properties?.classification && (
+                          <div>
+                            <span className="text-gray-600 font-medium">Classification:</span>
+                            <span className="ml-2">
+                              {result.properties.classification.join(', ')}
                             </span>
                           </div>
                         )}
@@ -698,6 +1044,44 @@ const App = () => {
                           </div>
                         )}
                       </div>
+
+                      {/* Current Positions */}
+                      {result.properties?.position && result.properties.position.length > 0 && (
+                        <div className="mb-4">
+                          <span className="text-gray-600 font-medium text-sm">🏛️ Current/Former Positions:</span>
+                          <div className="mt-1 space-y-1">
+                            {result.properties.position.slice(0, 3).map((position, i) => (
+                              <div key={i} className="text-sm text-gray-700 bg-green-50 px-3 py-2 rounded border-l-3 border-green-300">
+                                {position}
+                              </div>
+                            ))}
+                            {result.properties.position.length > 3 && (
+                              <div className="text-xs text-gray-500 px-3 py-1">
+                                +{result.properties.position.length - 3} more positions
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Names and Aliases */}
+                      {result.properties?.alias && result.properties.alias.length > 0 && (
+                        <div className="mb-4">
+                          <span className="text-gray-600 font-medium text-sm">👤 Known Aliases:</span>
+                          <div className="mt-1 flex flex-wrap gap-1">
+                            {result.properties.alias.slice(0, 5).map((alias, i) => (
+                              <span key={i} className="px-2 py-1 bg-gray-100 text-gray-800 rounded text-xs">
+                                {alias}
+                              </span>
+                            ))}
+                            {result.properties.alias.length > 5 && (
+                              <span className="px-2 py-1 text-gray-500 text-xs">
+                                +{result.properties.alias.length - 5} more
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                      )}
 
                       {/* Topics/Sanctions */}
                       {result.properties?.topics && (
@@ -1027,7 +1411,6 @@ const App = () => {
 
   const filteredHistory = searchHistory.filter(item => {
     switch (historyFilter) {
-      case 'starred': return item.is_starred;
       case 'high-risk': return item.risk_level === 'HIGH';
       case 'medium-risk': return item.risk_level === 'MEDIUM';
       case 'clean': return item.results_count === 0;
@@ -1051,7 +1434,6 @@ const App = () => {
               className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
             >
               <option value="all">All Searches</option>
-              <option value="starred">⭐ Starred</option>
               <option value="high-risk">🔴 High Risk</option>
               <option value="medium-risk">🟡 Medium Risk</option>
               <option value="clean">✅ Clean</option>
@@ -1076,22 +1458,59 @@ const App = () => {
           </div>
         </div>
       </div>
+
+      {/* Quick Stats */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        <div className="bg-white p-4 rounded-lg shadow-sm border">
+          <div className="flex items-center gap-3">
+            <div className="bg-gray-100 p-2 rounded-full">
+              <History className="h-5 w-5 text-gray-600" />
+            </div>
+            <div>
+              <p className="text-lg font-semibold text-gray-900">{searchHistory.length}</p>
+              <p className="text-xs text-gray-600">Total Searches</p>
+            </div>
+          </div>
+        </div>
+        <div className="bg-white p-4 rounded-lg shadow-sm border">
+          <div className="flex items-center gap-3">
+            <div className="bg-yellow-100 p-2 rounded-full">
+              <Star className="h-5 w-5 text-yellow-600" />
+            </div>
+            <div>
+              <p className="text-lg font-semibold text-yellow-600">
+                {analytics?.summary?.starred_entities || 0}
+              </p>
+              <p className="text-xs text-gray-600">Starred Entities</p>
+            </div>
+          </div>
+        </div>
+        <div className="bg-white p-4 rounded-lg shadow-sm border">
+          <div className="flex items-center gap-3">
+            <div className="bg-red-100 p-2 rounded-full">
+              <AlertCircle className="h-5 w-5 text-red-600" />
+            </div>
+            <div>
+              <p className="text-lg font-semibold text-red-600">
+                {searchHistory.filter(s => s.risk_level === 'HIGH').length}
+              </p>
+              <p className="text-xs text-gray-600">High Risk</p>
+            </div>
+          </div>
+        </div>
+      </div>
       
       {/* Search History Cards */}
       {filteredHistory.length > 0 ? (
         <div className="grid grid-cols-1 gap-4">
           {filteredHistory.map((item) => (
-            <div key={item.id} className="bg-white p-6 rounded-lg shadow-sm border border-gray-200 hover:shadow-md transition-shadow">
+            <div 
+              key={item.id} 
+              className="bg-white p-6 rounded-lg shadow-sm border border-gray-200 hover:shadow-md transition-shadow"
+            >
               <div className="flex items-start justify-between">
                 <div className="flex-1">
                   <div className="flex items-center gap-3 mb-3">
-                    <button
-                      onClick={() => toggleStar(item.id)}
-                      className={`p-1 rounded-full ${item.is_starred ? 'text-yellow-500' : 'text-gray-400 hover:text-yellow-500'}`}
-                      title={item.is_starred ? 'Unstar search' : 'Star search'}
-                    >
-                      <Star className={`h-5 w-5 ${item.is_starred ? 'fill-current' : ''}`} />
-                    </button>
                     <h4 className="text-lg font-semibold text-gray-900">{item.query}</h4>
                     <span className={`px-3 py-1 rounded-full text-xs font-medium ${getRiskLevelColor(item.risk_level)}`}>
                       {item.risk_level}
@@ -1107,17 +1526,17 @@ const App = () => {
                       <span className="ml-2 font-semibold">{item.results_count}</span>
                     </div>
                     <div>
-                      <span className="text-gray-600 font-medium">Risk Score:</span>
-                      <span className="ml-2 font-semibold">{item.risk_score}%</span>
+                      <span className="text-gray-600 font-medium">Relevance:</span>
+                      <span className="ml-2 font-semibold">{item.relevance_score || 0}%</span>
                     </div>
                     <div>
                       <span className="text-gray-600 font-medium">Source:</span>
                       <span className={`ml-2 px-2 py-1 rounded text-xs ${
-                        item.data_source === 'opensanctions' 
+                        item.data_source?.includes('opensanctions') 
                           ? 'bg-green-100 text-green-800' 
                           : 'bg-gray-100 text-gray-800'
                       }`}>
-                        {item.data_source === 'opensanctions' ? 'Live Data' : 'Mock Data'}
+                        {item.data_source?.includes('opensanctions') ? 'Live Data' : 'Mock Data'}
                       </span>
                     </div>
                     <div>
@@ -1130,6 +1549,18 @@ const App = () => {
                     <div className="flex items-center gap-2 text-xs text-gray-500 mb-3">
                       <Clock className="h-3 w-3" />
                       Execution time: {item.execution_time_ms}ms
+                    </div>
+                  )}
+
+                  {item.notes && (
+                    <div className="bg-purple-50 border border-purple-200 rounded-lg p-3 mb-3">
+                      <div className="flex items-start gap-2">
+                        <MessageSquare className="h-4 w-4 text-purple-600 mt-0.5 flex-shrink-0" />
+                        <div>
+                          <h6 className="text-sm font-medium text-purple-900 mb-1">Search Notes:</h6>
+                          <p className="text-sm text-purple-800">{item.notes}</p>
+                        </div>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -1154,14 +1585,22 @@ const App = () => {
                   </button>
                   <button 
                     onClick={() => {
-                      setSelectedSearch(item);
-                      setNewNote({ ...newNote, entityId: '', entityName: '' });
-                      setShowNotes(true);
+                      const notes = prompt('Add notes for this search:', item.notes || '');
+                      if (notes !== null) {
+                        updateSearchNotes(item.id, notes);
+                      }
                     }}
                     className="p-2 text-purple-600 hover:text-purple-800 hover:bg-purple-50 rounded-lg transition-colors" 
-                    title="Add notes"
+                    title="Add/edit search notes"
                   >
                     <MessageSquare className="h-4 w-4" />
+                  </button>
+                  <button 
+                    onClick={() => deleteSearchHistory(item.id)}
+                    className="p-2 text-red-600 hover:text-red-800 hover:bg-red-50 rounded-lg transition-colors" 
+                    title="Delete search"
+                  >
+                    <Trash2 className="h-4 w-4" />
                   </button>
                 </div>
               </div>
@@ -1177,7 +1616,7 @@ const App = () => {
           <p className="text-gray-600 mb-6">
             {historyFilter === 'all' 
               ? 'Your search history will appear here after you perform searches.' 
-              : `No searches match the "${historyFilter}" filter.`
+              : `No searches match the "${historyFilter.replace('-', ' ')}" filter.`
             }
           </p>
           <div className="flex justify-center gap-3">
@@ -1204,39 +1643,406 @@ const App = () => {
   );
 
   const ReportsView = () => (
-    <div className="bg-white p-6 rounded-lg shadow-sm border">
-      <h3 className="text-xl font-semibold mb-6">Compliance Reports</h3>
-      
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-        <div className="border border-gray-200 rounded-lg p-4">
-          <h4 className="font-medium text-gray-900 mb-2">Daily Summary Report</h4>
-          <p className="text-sm text-gray-600 mb-4">Generate daily compliance summary with search statistics</p>
-          <button className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2">
-            <Download className="h-4 w-4" />
-            Generate Report
-          </button>
+    <div className="space-y-6">
+      {/* Header */}
+      <div className="bg-gradient-to-r from-purple-600 to-purple-800 rounded-lg p-6 text-white">
+        <h2 className="text-2xl font-bold mb-2">Compliance Reports</h2>
+        <p className="text-purple-100">Generate detailed reports for compliance and audit purposes</p>
+      </div>
+
+      {/* Starred Searches Report Section */}
+      <div className="bg-white p-6 rounded-lg shadow-sm border">
+        <div className="flex items-center justify-between mb-6">
+          <div>
+            <h3 className="text-xl font-semibold text-gray-900 flex items-center gap-2">
+              <Star className="h-5 w-5 text-yellow-500" />
+              Starred Entities Report
+            </h3>
+            <p className="text-sm text-gray-600 mt-1">Detailed report of all important entities you've starred</p>
+          </div>
+          <div className="flex gap-3 flex-wrap">
+            <button
+              onClick={loadStarredEntities}
+              disabled={isLoadingStarred}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 flex items-center gap-2"
+            >
+              {isLoadingStarred ? (
+                <>
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                  Loading...
+                </>
+              ) : (
+                <>
+                  <Activity className="h-4 w-4" />
+                  Load Starred
+                </>
+              )}
+            </button>
+            <div className="flex gap-2">
+              <button
+                onClick={generateStarredReport}
+                className="px-3 py-2 bg-yellow-600 text-white rounded-lg hover:bg-yellow-700 flex items-center gap-2 text-sm"
+                title="Export as JSON"
+              >
+                <Download className="h-4 w-4" />
+                JSON
+              </button>
+              <button
+                onClick={exportStarredEntitiesCsv}
+                className="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center gap-2 text-sm"
+                title="Export as CSV"
+              >
+                <Download className="h-4 w-4" />
+                CSV
+              </button>
+              <button
+                onClick={exportStarredEntitiesPdf}
+                className="px-3 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 flex items-center gap-2 text-sm"
+                title="Export as PDF"
+              >
+                <Download className="h-4 w-4" />
+                PDF
+              </button>
+            </div>
+          </div>
         </div>
-        
-        <div className="border border-gray-200 rounded-lg p-4">
-          <h4 className="font-medium text-gray-900 mb-2">Risk Assessment Report</h4>
-          <p className="text-sm text-gray-600 mb-4">Detailed analysis of high-risk entities found</p>
-          <button className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center gap-2">
-            <FileText className="h-4 w-4" />
-            Generate Report
-          </button>
+
+        {/* Starred Entities Display */}
+        {starredEntities.length > 0 && (
+          <div className="mb-6">
+            <h4 className="text-xl font-semibold mb-4">
+              Starred Entities ({starredEntities.length})
+            </h4>
+            
+            <div className="space-y-4">
+              {starredEntities.map((entity) => {
+                const entityData = entity.entity_data || {};
+                const properties = entityData.properties || {};
+                
+                return (
+                  <div key={entity.id} className="border-2 border-yellow-300 bg-yellow-50 rounded-lg p-5 hover:shadow-md transition-shadow">
+                    <div className="flex items-start justify-between">
+                      <div className="flex-1">
+                        <div className="flex items-center gap-3 mb-4">
+                          {entityData.schema === 'Person' ? 
+                            <User className="h-6 w-6 text-gray-600" /> : 
+                            <Building className="h-6 w-6 text-gray-600" />
+                          }
+                          <h4 className="text-lg font-semibold text-gray-900">
+                            {entity.entity_name}
+                          </h4>
+                          <span className="px-2 py-1 bg-yellow-100 text-yellow-800 rounded text-xs font-medium border-2 border-yellow-300">
+                            ⭐ STARRED ENTITY
+                          </span>
+                          <span className={`px-3 py-1 rounded-full text-sm font-medium border ${
+                            getRiskColor(entity.relevance_score || 0)
+                          }`}>
+                            Relevance: {entity.relevance_score || 0}%
+                          </span>
+                          <span className="px-3 py-1 bg-blue-100 text-blue-800 rounded-full text-sm font-medium">
+                            {entityData.schema || 'Entity'}
+                          </span>
+                        </div>
+                        
+                        {/* Basic Information Grid */}
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 text-sm mb-4">
+                          {properties.birthDate && (
+                            <div>
+                              <span className="text-gray-600 font-medium">Birth Date:</span>
+                              <span className="ml-2">
+                                {new Date(properties.birthDate[0]).toLocaleDateString()}
+                              </span>
+                            </div>
+                          )}
+                          {properties.birthPlace && (
+                            <div>
+                              <span className="text-gray-600 font-medium">Birth Place:</span>
+                              <span className="ml-2">
+                                {properties.birthPlace[0]}
+                              </span>
+                            </div>
+                          )}
+                          {properties.gender && (
+                            <div>
+                              <span className="text-gray-600 font-medium">Gender:</span>
+                              <span className="ml-2 capitalize">
+                                {properties.gender[0]}
+                              </span>
+                            </div>
+                          )}
+                          {properties.nationality && (
+                            <div>
+                              <span className="text-gray-600 font-medium">Nationality:</span>
+                              <span className="ml-2">
+                                {properties.nationality.join(', ').toUpperCase()}
+                              </span>
+                            </div>
+                          )}
+                          {properties.citizenship && (
+                            <div>
+                              <span className="text-gray-600 font-medium">Citizenship:</span>
+                              <span className="ml-2">
+                                {properties.citizenship.join(', ').toUpperCase()}
+                              </span>
+                            </div>
+                          )}
+                          {properties.country && (
+                            <div>
+                              <span className="text-gray-600 font-medium">Country:</span>
+                              <span className="ml-2">
+                                {properties.country.join(', ')}
+                              </span>
+                            </div>
+                          )}
+                          {properties.deathDate && (
+                            <div>
+                              <span className="text-gray-600 font-medium">Death Date:</span>
+                              <span className="ml-2 text-red-600">
+                                {properties.deathDate[0] === properties.deathDate[0].slice(0, 7) + '-01' 
+                                  ? properties.deathDate[0].slice(0, 7) 
+                                  : new Date(properties.deathDate[0]).toLocaleDateString()}
+                              </span>
+                            </div>
+                          )}
+                          {properties.title && (
+                            <div>
+                              <span className="text-gray-600 font-medium">Title:</span>
+                              <span className="ml-2">
+                                {properties.title.join(', ')}
+                              </span>
+                            </div>
+                          )}
+                          {properties.classification && (
+                            <div>
+                              <span className="text-gray-600 font-medium">Classification:</span>
+                              <span className="ml-2">
+                                {properties.classification.join(', ')}
+                              </span>
+                            </div>
+                          )}
+                          {entityData.datasets && (
+                            <div>
+                              <span className="text-gray-600 font-medium">Data Sources:</span>
+                              <span className="ml-2 text-xs">
+                                {entityData.datasets.length} sources
+                              </span>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Current Positions */}
+                        {properties.position && properties.position.length > 0 && (
+                          <div className="mb-4">
+                            <span className="text-gray-600 font-medium text-sm">🏛️ Current/Former Positions:</span>
+                            <div className="mt-1 space-y-1">
+                              {properties.position.slice(0, 3).map((position, i) => (
+                                <div key={i} className="text-sm text-gray-700 bg-green-50 px-3 py-2 rounded border-l-3 border-green-300">
+                                  {position}
+                                </div>
+                              ))}
+                              {properties.position.length > 3 && (
+                                <div className="text-xs text-gray-500 px-3 py-1">
+                                  +{properties.position.length - 3} more positions
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Names and Aliases */}
+                        {properties.alias && properties.alias.length > 0 && (
+                          <div className="mb-4">
+                            <span className="text-gray-600 font-medium text-sm">👤 Known Aliases:</span>
+                            <div className="mt-1 flex flex-wrap gap-1">
+                              {properties.alias.slice(0, 5).map((alias, i) => (
+                                <span key={i} className="px-2 py-1 bg-gray-100 text-gray-800 rounded text-xs">
+                                  {alias}
+                                </span>
+                              ))}
+                              {properties.alias.length > 5 && (
+                                <span className="px-2 py-1 text-gray-500 text-xs">
+                                  +{properties.alias.length - 5} more
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Topics/Sanctions */}
+                        {properties.topics && (
+                          <div className="mb-4">
+                            <span className="text-gray-600 font-medium text-sm">Sanctions/Topics:</span>
+                            <div className="mt-1 flex flex-wrap gap-1">
+                              {properties.topics.map((topic, i) => (
+                                <span key={i} className={`px-2 py-1 rounded text-xs font-medium ${
+                                  topic.includes('sanction') ? 'bg-red-100 text-red-800' :
+                                  topic.includes('pep') ? 'bg-orange-100 text-orange-800' :
+                                  topic.includes('crime') ? 'bg-purple-100 text-purple-800' :
+                                  'bg-blue-100 text-blue-800'
+                                }`}>
+                                  {topic.replace(/\./g, ' ').toUpperCase()}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Entity ID and Technical Info */}
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-xs text-gray-500 mb-4">
+                          <div>
+                            <span className="font-medium">Entity ID:</span>
+                            <span className="ml-2 font-mono">{entity.entity_id}</span>
+                          </div>
+                          {properties.wikidataId && (
+                            <div>
+                              <span className="font-medium">Wikidata:</span>
+                              <a 
+                                href={`https://www.wikidata.org/wiki/${properties.wikidataId[0]}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="ml-2 font-mono text-blue-600 hover:text-blue-800"
+                              >
+                                {properties.wikidataId[0]}
+                              </a>
+                            </div>
+                          )}
+                          {entityData.first_seen && (
+                            <div>
+                              <span className="font-medium">First Seen:</span>
+                              <span className="ml-2">{new Date(entityData.first_seen).toLocaleDateString()}</span>
+                            </div>
+                          )}
+                          {entityData.last_seen && (
+                            <div>
+                              <span className="font-medium">Last Updated:</span>
+                              <span className="ml-2">{new Date(entityData.last_seen).toLocaleDateString()}</span>
+                            </div>
+                          )}
+                        </div>
+
+                        {/* Notes from OpenSanctions */}
+                        {properties.notes && properties.notes.length > 0 && (
+                          <div className="mb-4 p-3 bg-blue-50 rounded-lg border-l-4 border-blue-500">
+                            <h6 className="font-medium text-blue-900 text-sm mb-2">📋 Official Notes:</h6>
+                            {properties.notes.map((note, i) => (
+                              <p key={i} className="text-sm text-blue-800 mb-1">{note}</p>
+                            ))}
+                          </div>
+                        )}
+
+                        {/* Addresses */}
+                        {properties.address && properties.address.length > 0 && (
+                          <div className="mb-4">
+                            <span className="text-gray-600 font-medium text-sm">📍 Addresses:</span>
+                            <div className="mt-1 space-y-1">
+                              {properties.address.slice(0, 3).map((address, i) => (
+                                <div key={i} className="text-sm text-gray-700 bg-gray-50 px-3 py-2 rounded">
+                                  {address}
+                                </div>
+                              ))}
+                              {properties.address.length > 3 && (
+                                <div className="text-xs text-gray-500 px-3 py-1">
+                                  +{properties.address.length - 3} more addresses
+                                </div>
+                              )}
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Search Context and Starred Info */}
+                        <div className="text-sm text-gray-600 mb-4 bg-yellow-100 border border-yellow-200 rounded p-3">
+                          <div className="flex items-center gap-4">
+                            <div>
+                              <span className="font-medium">From search:</span>
+                              <span className="ml-2">"{entity.search_context.query}"</span>
+                            </div>
+                            <div>
+                              <span className="font-medium">Starred:</span>
+                              <span className="ml-2">{formatDate(entity.starred_at)}</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Compliance Notes Section */}
+                        <div className="bg-purple-50 border border-purple-200 rounded-lg p-4 mb-4">
+                          <div className="flex items-center justify-between mb-3">
+                            <h5 className="font-medium text-purple-900 flex items-center gap-2">
+                              <MessageSquare className="h-4 w-4" />
+                              Compliance Notes
+                            </h5>
+                            {editingStarredNote !== entity.id && (
+                              <button
+                                onClick={() => startEditingStarredNote(entity.id)}
+                                className="px-3 py-1 bg-purple-600 text-white text-xs rounded hover:bg-purple-700 transition-colors"
+                                title="Add/edit compliance notes"
+                              >
+                                {entity.notes ? 'Edit Notes' : 'Add Notes'}
+                              </button>
+                            )}
+                          </div>
+                          
+                          {editingStarredNote === entity.id ? (
+                            /* Inline editing mode */
+                            <NotesTextarea
+                              initialValue={entity.notes}
+                              onSave={saveStarredNote}
+                              onCancel={cancelEditingStarredNote}
+                              entityId={entity.id}
+                            />
+                          ) : (
+                            /* Display mode */
+                            <>
+                              {entity.notes ? (
+                                <div className="bg-white border border-purple-200 rounded p-3">
+                                  <p className="text-sm text-gray-800 whitespace-pre-wrap">{entity.notes}</p>
+                                </div>
+                              ) : (
+                                <div className="text-center py-4">
+                                  <p className="text-sm text-purple-600 italic">No compliance notes added yet</p>
+                                  <p className="text-xs text-purple-500 mt-1">Click "Add Notes" to document compliance observations</p>
+                                </div>
+                              )}
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+          <h4 className="font-medium text-yellow-900 mb-2">📊 Enhanced Report Features</h4>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm text-yellow-800">
+            <div>
+              <h5 className="font-medium mb-2">Report Contents:</h5>
+              <ul className="space-y-1">
+                <li>• Complete OpenSanctions entity details</li>
+                <li>• Full risk assessments & scores</li>
+                <li>• Search context & timestamps</li>
+                <li>• <strong>Starred entity notes</strong> & compliance decisions</li>
+                <li>• Risk distribution analysis</li>
+                <li>• Complete audit trail with user actions</li>
+              </ul>
+            </div>
+            <div>
+              <h5 className="font-medium mb-2">Export Formats:</h5>
+              <ul className="space-y-1">
+                <li>• <strong>JSON:</strong> Complete data for analysis</li>
+                <li>• <strong>CSV:</strong> Spreadsheet-compatible format</li>
+                <li>• <strong>PDF:</strong> Professional compliance report</li>
+                <li>• Contains entity properties, countries, topics</li>
+                <li>• Includes source URLs and verification data</li>
+                <li>• Full OpenSanctions metadata included</li>
+              </ul>
+            </div>
+          </div>
         </div>
       </div>
-      
-      <div className="mt-6 p-4 bg-blue-50 rounded-lg">
-        <h4 className="font-medium text-blue-900 mb-2">Available Report Types</h4>
-        <ul className="text-sm text-blue-800 space-y-1">
-          <li>• Daily search activity summary</li>
-          <li>• High-risk entity detection report</li>
-          <li>• Compliance audit trail</li>
-          <li>• User activity monitoring</li>
-          <li>• BAM regulatory reporting</li>
-        </ul>
-      </div>
+
     </div>
   );
 
@@ -1280,9 +2086,9 @@ const App = () => {
                             {result.caption || result.name || 'Unknown Entity'}
                           </h4>
                           <span className={`px-2 py-1 rounded-full text-xs font-medium border ${
-                            getRiskColor(getRiskScore(result))
+                            getRiskColor(getRelevanceScore(result))
                           }`}>
-                            Risk: {getRiskScore(result)}%
+                            Relevance: {getRelevanceScore(result)}%
                           </span>
                         </div>
                         
