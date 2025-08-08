@@ -25,22 +25,47 @@ Thumbs.db
 # Logs
 logs/
 *.log
+nohup.out
+tunnel.log
 
 # Database
 *.db
 *.sqlite
+database/backups/*.sql
 
-# Uploads
+# Uploads & Temp files
 uploads/
 tmp/
+*.tmp
+*.temp
 
 # Docker
 .docker/
+docker-compose.override.yml
 
 # Backup files
 *.bak
 *.backup
+*-old.*
+*-backup.*
+
+# Development files
+scripts/venv/
+scripts/__pycache__/
+.pytest_cache/
+.coverage
 
 # Custom datasets (may contain sensitive data)
 custom-datasets/
 TafraData/
+
+# Documentation (auto-generated)
+*_ENHANCEMENT.md
+*_INTERFACE.md
+*_CRITERIA.md
+*_SUMMARY.md
+
+# Tunnel and mobile access docs (duplicates)
+LOCAL_TUNNEL_GUIDE.md
+TUNNEL_SETUP.md
+MOBILE_ACCESS.md
