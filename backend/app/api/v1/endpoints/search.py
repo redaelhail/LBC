@@ -25,6 +25,23 @@ class SearchRequest(BaseModel):
     schema: Optional[str] = None
     countries: Optional[List[str]] = None
     topics: Optional[List[str]] = None
+    # Enhanced search criteria based on OpenSanctions API
+    include_dataset: Optional[List[str]] = None
+    exclude_dataset: Optional[List[str]] = None
+    exclude_schema: Optional[List[str]] = None
+    changed_since: Optional[str] = None
+    datasets: Optional[List[str]] = None
+    sort: Optional[List[str]] = None
+    fuzzy: bool = False
+    simple: bool = False
+    facets: Optional[List[str]] = ["countries", "topics", "datasets"]
+    filter_op: str = "OR"  # OR or AND for combining filters
+    # Morocco-specific filters
+    risk_level: Optional[List[str]] = None
+    political_party: Optional[str] = None
+    region: Optional[str] = None
+    position_type: Optional[str] = None  # parliament, regional, municipal
+    mandate_year: Optional[str] = None
 
 class NoteRequest(BaseModel):
     search_history_id: int
@@ -65,19 +82,41 @@ async def search_entities(request: SearchRequest, db: Session = Depends(get_db))
         return generate_fallback_response(request, opensanctions_status)
     
     try:
-        # Prepare search parameters
+        # Prepare search parameters with enhanced criteria
         params = {
             "q": request.query,
             "limit": request.limit,
             "offset": request.offset,
+            "filter_op": request.filter_op,
+            "fuzzy": request.fuzzy,
+            "simple": request.simple
         }
         
+        # Add facets
+        if request.facets:
+            params["facets"] = request.facets
+        
+        # Basic filters
         if request.schema:
             params["schema"] = request.schema
         if request.countries:
             params["countries"] = request.countries
         if request.topics:
             params["topics"] = request.topics
+            
+        # Enhanced OpenSanctions filters
+        if request.include_dataset:
+            params["include_dataset"] = request.include_dataset
+        if request.exclude_dataset:
+            params["exclude_dataset"] = request.exclude_dataset
+        if request.exclude_schema:
+            params["exclude_schema"] = request.exclude_schema
+        if request.changed_since:
+            params["changed_since"] = request.changed_since
+        if request.datasets:
+            params["datasets"] = request.datasets
+        if request.sort:
+            params["sort"] = request.sort
             
         logger.info(f"Searching OpenSanctions API: {opensanctions_url}/search/{request.dataset}")
         
@@ -98,10 +137,19 @@ async def search_entities(request: SearchRequest, db: Session = Depends(get_db))
                     enhanced_entity = enhance_entity_for_morocco(entity)
                     enhanced_results.append(enhanced_entity)
                 
-                # Add custom Moroccan entities
-                moroccan_matches = moroccan_entities_service.search_entities(
+                # Add custom Moroccan entities with enhanced filtering
+                moroccan_search_filters = {
+                    "schema_filter": request.schema,
+                    "risk_level": request.risk_level,
+                    "political_party": request.political_party,
+                    "region": request.region,
+                    "position_type": request.position_type,
+                    "mandate_year": request.mandate_year
+                }
+                
+                moroccan_matches = moroccan_entities_service.search_entities_enhanced(
                     request.query, 
-                    schema_filter=request.schema
+                    **moroccan_search_filters
                 )
                 
                 # Merge results, prioritizing by score
@@ -1683,5 +1731,131 @@ async def export_starred_entities_pdf(db: Session = Depends(get_db)):
     except Exception as e:
         logger.error(f"Failed to export PDF: {e}")
         raise HTTPException(status_code=500, detail=f"Failed to export PDF: {str(e)}")
+
+@router.get("/filter-options")
+async def get_filter_options() -> Dict[str, Any]:
+    """Get available filter options for enhanced search"""
+    
+    try:
+        # Get available topics and datasets from OpenSanctions
+        opensanctions_status = await check_opensanctions_health()
+        
+        if opensanctions_status["status"] == "healthy":
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                response = await client.get(f"{settings.OPENSANCTIONS_BASE_URL}/search/default?q=&limit=1")
+                if response.status_code == 200:
+                    data = response.json()
+                    facets = data.get("facets", {})
+                else:
+                    facets = {}
+        else:
+            facets = {}
+        
+        # Get Moroccan-specific options
+        moroccan_options = get_moroccan_filter_options()
+        
+        return {
+            "opensanctions": {
+                "topics": facets.get("topics", {}).get("values", []),
+                "datasets": facets.get("datasets", {}).get("values", []),
+                "countries": facets.get("countries", {}).get("values", [])
+            },
+            "moroccan": moroccan_options,
+            "schemas": [
+                {"name": "Person", "label": "Person", "count": 0},
+                {"name": "Company", "label": "Company", "count": 0},
+                {"name": "Organization", "label": "Organization", "count": 0}
+            ],
+            "sort_options": [
+                {"name": "score", "label": "Relevance"},
+                {"name": "name", "label": "Name"},
+                {"name": "updated", "label": "Last Updated"},
+                {"name": "created", "label": "Created"}
+            ],
+            "filter_operators": [
+                {"name": "OR", "label": "Any (OR)"},
+                {"name": "AND", "label": "All (AND)"}
+            ]
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting filter options: {e}")
+        return {
+            "opensanctions": {"topics": [], "datasets": [], "countries": []},
+            "moroccan": get_moroccan_filter_options(),
+            "schemas": [],
+            "sort_options": [],
+            "filter_operators": []
+        }
+
+def get_moroccan_filter_options() -> Dict[str, Any]:
+    """Get Morocco-specific filter options"""
+    
+    # Get statistics from Moroccan entities service
+    service = moroccan_entities_service
+    all_entities = service.get_all_entities()
+    
+    # Collect unique values
+    parties = set()
+    regions = set()
+    risk_levels = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
+    position_types = {"parliament": 0, "regional": 0, "municipal": 0}
+    mandate_years = set()
+    
+    for entity in all_entities:
+        properties = entity.get("properties", {})
+        
+        # Collect political parties
+        for party in properties.get("politicalParty", []):
+            if party:
+                parties.add(party)
+        
+        # Collect regions
+        for region in properties.get("region", []):
+            if region:
+                regions.add(region)
+        
+        # Count risk levels
+        risk = entity.get("risk_level", "LOW")
+        if risk in risk_levels:
+            risk_levels[risk] += 1
+        
+        # Count position types
+        datasets = entity.get("datasets", [])
+        if any("parliament" in ds for ds in datasets):
+            position_types["parliament"] += 1
+        elif any("regional" in ds for ds in datasets):
+            position_types["regional"] += 1
+        elif any("communal" in ds for ds in datasets):
+            position_types["municipal"] += 1
+        
+        # Collect mandate years
+        for mandate in properties.get("mandate", []):
+            if mandate and len(mandate) == 4 and mandate.isdigit():
+                mandate_years.add(mandate)
+    
+    return {
+        "political_parties": [
+            {"name": party, "label": party, "count": 0} 
+            for party in sorted(parties)
+        ],
+        "regions": [
+            {"name": region, "label": region, "count": 0} 
+            for region in sorted(regions)
+        ],
+        "risk_levels": [
+            {"name": level, "label": level, "count": count} 
+            for level, count in risk_levels.items()
+        ],
+        "position_types": [
+            {"name": "parliament", "label": "Parliament Members", "count": position_types["parliament"]},
+            {"name": "regional", "label": "Regional Officials", "count": position_types["regional"]},
+            {"name": "municipal", "label": "Municipal Officials", "count": position_types["municipal"]}
+        ],
+        "mandate_years": [
+            {"name": year, "label": year, "count": 0} 
+            for year in sorted(mandate_years, reverse=True)
+        ]
+    }
 
 from datetime import datetime

@@ -122,6 +122,21 @@ const App = () => {
   const [isLoadingStarred, setIsLoadingStarred] = useState(false);
   const [starredEntityIds, setStarredEntityIds] = useState(new Set());
   
+  // Enhanced search parameters
+  const [showAdvancedSearch, setShowAdvancedSearch] = useState(false);
+  const [searchFilters, setSearchFilters] = useState({
+    // Basic search fields
+    first_name: '',
+    last_name: '',
+    birth_date: '',
+    role: '',
+    country: '',
+    entity_type: 'Person',
+    search_type: 'exact',
+    dataset: '',
+    fuzzy: false
+  });
+  
   // Refs to maintain focus
   const searchInputRef = useRef(null);
   const dashboardInputRef = useRef(null);
@@ -415,10 +430,15 @@ const App = () => {
     
     try {
       
+      // Build request body with search parameters
       const requestBody = { 
         query: query,
-        dataset: 'default',
-        limit: 10 
+        dataset: searchFilters.dataset || 'default',
+        limit: 10,
+        // Add non-empty filters
+        ...(searchFilters.entity_type && { schema: searchFilters.entity_type }),
+        ...(searchFilters.country && { countries: [searchFilters.country] }),
+        ...(searchFilters.fuzzy && { fuzzy: true })
       };
       
       const response = await fetch(`${API_BASE_URL}/api/v1/search/entities`, {
@@ -887,6 +907,169 @@ const App = () => {
             )}
           </button>
         </div>
+
+        {/* Advanced Search Toggle */}
+        <div className="mb-4">
+          <button
+            onClick={() => setShowAdvancedSearch(!showAdvancedSearch)}
+            className="flex items-center gap-2 text-blue-600 hover:text-blue-700 transition-colors"
+          >
+            <Filter className="h-4 w-4" />
+            {showAdvancedSearch ? 'Hide Advanced Filters' : 'Show Advanced Filters'}
+            <span className="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded-full">
+              {Object.values(searchFilters).filter(v => v !== '' && v !== false && v !== 'exact' && v !== 'Person').length} active
+            </span>
+          </button>
+        </div>
+
+        {/* Advanced Search Panel */}
+        {showAdvancedSearch && (
+          <div className="mb-6 p-4 bg-gray-50 rounded-lg border">
+            <h3 className="text-lg font-semibold mb-4">Advanced Search Filters</h3>
+            
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              
+              {/* First Name */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">First Name</label>
+                <input
+                  type="text"
+                  value={searchFilters.first_name}
+                  onChange={(e) => setSearchFilters(prev => ({ ...prev, first_name: e.target.value }))}
+                  placeholder="Enter first name..."
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+              </div>
+
+              {/* Last Name */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Last Name</label>
+                <input
+                  type="text"
+                  value={searchFilters.last_name}
+                  onChange={(e) => setSearchFilters(prev => ({ ...prev, last_name: e.target.value }))}
+                  placeholder="Enter last name..."
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+              </div>
+
+              {/* Birth Date */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Birth Date</label>
+                <input
+                  type="date"
+                  value={searchFilters.birth_date}
+                  onChange={(e) => setSearchFilters(prev => ({ ...prev, birth_date: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+              </div>
+
+              {/* Role */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Role/Position</label>
+                <input
+                  type="text"
+                  value={searchFilters.role}
+                  onChange={(e) => setSearchFilters(prev => ({ ...prev, role: e.target.value }))}
+                  placeholder="e.g. CEO, Minister, Director..."
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+              </div>
+
+              {/* Entity Type */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Entity Type</label>
+                <select
+                  value={searchFilters.entity_type}
+                  onChange={(e) => setSearchFilters(prev => ({ ...prev, entity_type: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                >
+                  <option value="Person">Person</option>
+                  <option value="Company">Company</option>
+                  <option value="Organization">Organization</option>
+                </select>
+              </div>
+
+              {/* Country */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Country</label>
+                <input
+                  type="text"
+                  value={searchFilters.country}
+                  onChange={(e) => setSearchFilters(prev => ({ ...prev, country: e.target.value }))}
+                  placeholder="Country code (e.g. US, UK, FR, MA)"
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                />
+              </div>
+
+              {/* Dataset */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Dataset</label>
+                <select
+                  value={searchFilters.dataset}
+                  onChange={(e) => setSearchFilters(prev => ({ ...prev, dataset: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                >
+                  <option value="">All Datasets</option>
+                  <option value="default">OpenSanctions</option>
+                  <option value="moroccan_entities">Moroccan Entities</option>
+                </select>
+              </div>
+
+              {/* Search Type */}
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-2">Search Type</label>
+                <select
+                  value={searchFilters.search_type}
+                  onChange={(e) => setSearchFilters(prev => ({ ...prev, search_type: e.target.value }))}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                >
+                  <option value="exact">Exact Match</option>
+                  <option value="partial">Partial Match</option>
+                  <option value="fuzzy">Fuzzy Search</option>
+                </select>
+              </div>
+
+            </div>
+
+            {/* Search Options */}
+            <div className="mt-6 flex flex-wrap gap-4">
+              <label className="flex items-center">
+                <input
+                  type="checkbox"
+                  checked={searchFilters.fuzzy}
+                  onChange={(e) => setSearchFilters(prev => ({ ...prev, fuzzy: e.target.checked }))}
+                  className="mr-2"
+                />
+                <span className="text-sm">Enable fuzzy search (handles typos and variations)</span>
+              </label>
+            </div>
+
+            {/* Clear Filters Button */}
+            <div className="mt-6 flex justify-between items-center">
+              <button
+                onClick={() => setSearchFilters({
+                  first_name: '',
+                  last_name: '',
+                  birth_date: '',
+                  role: '',
+                  country: '',
+                  entity_type: 'Person',
+                  search_type: 'exact',
+                  dataset: '',
+                  fuzzy: false
+                })}
+                className="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 transition-colors"
+              >
+                Clear All Filters
+              </button>
+              
+              <div className="text-sm text-gray-600">
+                Active filters: {Object.values(searchFilters).filter(v => v !== '' && v !== false && v !== 'exact' && v !== 'Person').length}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Error Display */}
         {error && (

@@ -162,11 +162,34 @@ class MoroccanEntitiesService:
     
     def search_entities(self, query: str, schema_filter: Optional[str] = None) -> List[Dict[str, Any]]:
         """
-        Search Moroccan entities by query
+        Search Moroccan entities by query (legacy method)
         
         Args:
             query: Search query string
             schema_filter: Optional schema filter (Person, Company, etc.)
+            
+        Returns:
+            List of matching entities with scores
+        """
+        return self.search_entities_enhanced(query, schema_filter=schema_filter)
+    
+    def search_entities_enhanced(self, query: str, schema_filter: Optional[str] = None, 
+                               risk_level: Optional[List[str]] = None,
+                               political_party: Optional[str] = None,
+                               region: Optional[str] = None,
+                               position_type: Optional[str] = None,
+                               mandate_year: Optional[str] = None) -> List[Dict[str, Any]]:
+        """
+        Enhanced search with comprehensive filtering for Moroccan entities
+        
+        Args:
+            query: Search query string
+            schema_filter: Optional schema filter (Person, Company, etc.)
+            risk_level: Filter by risk levels (HIGH, MEDIUM, LOW)
+            political_party: Filter by political party
+            region: Filter by region
+            position_type: Filter by position type (parliament, regional, municipal)
+            mandate_year: Filter by mandate year
             
         Returns:
             List of matching entities with scores
@@ -181,7 +204,13 @@ class MoroccanEntitiesService:
         results = []
         
         for entity in self.entities:
+            # Apply schema filter
             if schema_filter and entity.get("schema") != schema_filter:
+                continue
+            
+            # Apply Morocco-specific filters
+            if not self._passes_moroccan_filters(entity, risk_level, political_party, 
+                                               region, position_type, mandate_year):
                 continue
                 
             # Calculate relevance score
@@ -249,6 +278,62 @@ class MoroccanEntitiesService:
             score += 0.3
             
         return min(score, 1.0)  # Cap at 1.0
+    
+    def _passes_moroccan_filters(self, entity: Dict[str, Any], 
+                               risk_level: Optional[List[str]] = None,
+                               political_party: Optional[str] = None,
+                               region: Optional[str] = None,
+                               position_type: Optional[str] = None,
+                               mandate_year: Optional[str] = None) -> bool:
+        """Check if entity passes Morocco-specific filters"""
+        
+        properties = entity.get("properties", {})
+        
+        # Risk level filter
+        if risk_level and entity.get("risk_level") not in risk_level:
+            return False
+        
+        # Political party filter
+        if political_party:
+            entity_parties = [p.lower() for p in properties.get("politicalParty", [])]
+            party_search = political_party.lower()
+            if not any(party_search in party or party in party_search for party in entity_parties):
+                # Also check party abbreviations
+                party_abbrevs = [abbrev for abbrev, full in self.party_mappings.items() 
+                               if party_search in full.lower() or full.lower() in party_search]
+                if not any(abbrev.lower() in entity_parties for abbrev in party_abbrevs):
+                    return False
+        
+        # Region filter
+        if region:
+            entity_regions = [r.lower() for r in properties.get("region", [])]
+            region_search = region.lower()
+            if not any(region_search in reg or reg in region_search for reg in entity_regions):
+                return False
+        
+        # Position type filter (parliament, regional, municipal)
+        if position_type:
+            datasets = entity.get("datasets", [])
+            if position_type.lower() == "parliament":
+                if not any("parliament" in ds for ds in datasets):
+                    return False
+            elif position_type.lower() == "regional":
+                if not any("regional" in ds for ds in datasets):
+                    return False
+            elif position_type.lower() == "municipal" or position_type.lower() == "communal":
+                if not any("communal" in ds for ds in datasets):
+                    return False
+        
+        # Mandate year filter
+        if mandate_year:
+            entity_mandates = properties.get("mandate", [])
+            if mandate_year not in entity_mandates:
+                # Also check if year appears in dataset names
+                datasets = entity.get("datasets", [])
+                if not any(mandate_year in ds for ds in datasets):
+                    return False
+        
+        return True
     
     def _fuzzy_match(self, query: str, text: str) -> bool:
         """Simple fuzzy matching for names"""
