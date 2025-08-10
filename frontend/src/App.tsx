@@ -1,5 +1,97 @@
-import React, { useState, useEffect, useRef, useCallback, memo } from 'react';
-import { Search, User, Building, AlertCircle, CheckCircle, Loader2, History, FileText, Globe, Calendar, Download, Eye, Plus, Edit, Trash2, Save, X, MessageSquare, Star, Filter, TrendingUp, BarChart3, Activity, Clock, Target, Shield } from 'lucide-react';
+import React, { useState, useEffect, useRef, useCallback, memo, useMemo } from 'react';
+import { Search, User, Building, AlertCircle, CheckCircle, Loader2, History, FileText, Globe, Calendar, Download, Eye, Plus, Edit, Trash2, Save, X, MessageSquare, Star, Filter, TrendingUp, BarChart3, Activity, Clock, Target, Shield, UserIcon, Settings, Users, UserX, UserCheck, Key } from 'lucide-react';
+
+// Simple Login Component
+const LoginForm = () => {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const handleLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setLoading(true);
+
+    try {
+      const response = await fetch('/api/v1/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email, password }),
+      });
+
+      if (!response.ok) {
+        throw new Error('Login failed');
+      }
+
+      const data = await response.json();
+      localStorage.setItem('access_token', data.access_token);
+      localStorage.setItem('user', JSON.stringify(data.user));
+      window.location.reload();
+    } catch (err: any) {
+      setError(err.message || 'Login failed');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gray-50">
+      <div className="max-w-md w-full space-y-8">
+        <div className="text-center">
+          <Shield className="mx-auto h-12 w-12 text-blue-600" />
+          <h2 className="mt-6 text-3xl font-bold text-gray-900">SanctionsGuard Pro</h2>
+          <p className="mt-2 text-sm text-gray-600">Sign in to access the platform</p>
+        </div>
+
+        <form className="mt-8 space-y-6" onSubmit={handleLogin}>
+          {error && (
+            <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded">
+              {error}
+            </div>
+          )}
+
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700">Email</label>
+              <input
+                type="email"
+                required
+                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                placeholder="admin@sanctionsguard.com"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700">Password</label>
+              <input
+                type="password"
+                required
+                className="mt-1 block w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                placeholder="admin123"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+              />
+            </div>
+          </div>
+
+          <button
+            type="submit"
+            disabled={loading}
+            className="w-full flex justify-center py-2 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 disabled:opacity-50"
+          >
+            {loading ? 'Signing in...' : 'Sign In'}
+          </button>
+
+          <div className="text-center text-sm text-gray-500">
+            Default: admin@sanctionsguard.com / admin123
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+};
 
 // Move SearchInput outside the main component to prevent recreation
 const SearchInput = React.memo(({ 
@@ -95,7 +187,9 @@ const NotesTextarea = memo(({ initialValue, onSave, onCancel, entityId }) => {
   );
 });
 
-const App = () => {
+const MainApp = () => {
+  const [user, setUser] = useState(JSON.parse(localStorage.getItem('user') || '{}'));
+  const isAdmin = user?.role === 'admin';
   // API Configuration - use relative URLs (proxied by Vite)
   const API_BASE_URL = '';
 
@@ -156,7 +250,10 @@ const App = () => {
 
   const loadAnalytics = async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/v1/search/analytics`);
+      const token = localStorage.getItem('access_token');
+      const response = await fetch(`${API_BASE_URL}/api/v1/search/analytics`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
       if (response.ok) {
         const data = await response.json();
         setAnalytics(data);
@@ -185,9 +282,13 @@ const App = () => {
         user_id: 1
       };
       
+      const token = localStorage.getItem('access_token');
       const response = await fetch(`${API_BASE_URL}/api/v1/search/entities/star`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
         body: JSON.stringify(requestData)
       });
       
@@ -228,7 +329,10 @@ const App = () => {
   const loadSearchHistory = async () => {
     setIsLoadingHistory(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/api/v1/search/history`);
+      const token = localStorage.getItem('access_token');
+      const response = await fetch(`${API_BASE_URL}/api/v1/search/history`, {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
       if (response.ok) {
         const data = await response.json();
         setSearchHistory(data.items || []);
@@ -243,7 +347,11 @@ const App = () => {
   const loadStarredEntities = async () => {
     setIsLoadingStarred(true);
     try {
-      const response = await fetch(`${API_BASE_URL}/api/v1/search/entities/starred`);
+      const response = await fetch(`${API_BASE_URL}/api/v1/search/entities/starred`, {
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('access_token')}`
+        }
+      });
       if (response.ok) {
         const data = await response.json();
         setStarredEntities(data.items || []);
@@ -257,7 +365,11 @@ const App = () => {
 
   const loadStarredEntityIdsForSearch = async (searchId) => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/v1/search/entities/starred/search/${searchId}`);
+      const response = await fetch(`${API_BASE_URL}/api/v1/search/entities/starred/search/${searchId}`, {
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('access_token')}`
+        }
+      });
       if (response.ok) {
         const data = await response.json();
         setStarredEntityIds(new Set(data.starred_entity_ids || []));
@@ -269,7 +381,11 @@ const App = () => {
 
   const generateStarredReport = async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/v1/search/reports/starred-entities`);
+      const response = await fetch(`${API_BASE_URL}/api/v1/search/reports/starred-entities`, {
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('access_token')}`
+        }
+      });
       if (response.ok) {
         const report = await response.json();
         
@@ -294,7 +410,11 @@ const App = () => {
 
   const exportStarredEntitiesCsv = async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/v1/search/reports/starred-entities/csv`);
+      const response = await fetch(`${API_BASE_URL}/api/v1/search/reports/starred-entities/csv`, {
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('access_token')}`
+        }
+      });
       if (response.ok) {
         const blob = await response.blob();
         const url = URL.createObjectURL(blob);
@@ -313,7 +433,11 @@ const App = () => {
 
   const exportStarredEntitiesPdf = async () => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/v1/search/reports/starred-entities/pdf`);
+      const response = await fetch(`${API_BASE_URL}/api/v1/search/reports/starred-entities/pdf`, {
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('access_token')}`
+        }
+      });
       if (response.ok) {
         const blob = await response.blob();
         const url = URL.createObjectURL(blob);
@@ -355,7 +479,10 @@ const App = () => {
     try {
       const response = await fetch(`${API_BASE_URL}/api/v1/search/history/${searchId}/notes`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('access_token')}`
+        },
         body: JSON.stringify({ notes })
       });
       
@@ -379,7 +506,10 @@ const App = () => {
     try {
       const response = await fetch(`${API_BASE_URL}/api/v1/search/entities/star/${starredEntityId}/notes`, {
         method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('access_token')}`
+        },
         body: JSON.stringify({ notes })
       });
       
@@ -441,11 +571,13 @@ const App = () => {
         ...(searchFilters.fuzzy && { fuzzy: true })
       };
       
+      const token = localStorage.getItem('access_token');
       const response = await fetch(`${API_BASE_URL}/api/v1/search/entities`, {
         method: 'POST',
         headers: { 
           'Content-Type': 'application/json',
-          'Accept': 'application/json'
+          'Accept': 'application/json',
+          'Authorization': `Bearer ${token}`
         },
         body: JSON.stringify(requestBody),
       });
@@ -509,7 +641,11 @@ const App = () => {
 
   const loadSearchDetails = async (historyId) => {
     try {
-      const response = await fetch(`${API_BASE_URL}/api/v1/search/history/${historyId}/details`);
+      const response = await fetch(`${API_BASE_URL}/api/v1/search/history/${historyId}/details`, {
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('access_token')}`
+        }
+      });
       if (response.ok) {
         const data = await response.json();
         setSelectedSearch(data.search_history);
@@ -527,7 +663,10 @@ const App = () => {
     try {
       const response = await fetch(`${API_BASE_URL}/api/v1/search/notes`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('access_token')}`
+        },
         body: JSON.stringify({
           search_history_id: selectedSearch.id,
           entity_id: entityId,
@@ -556,7 +695,11 @@ const App = () => {
           await new Promise(resolve => setTimeout(resolve, 200)); // Wait 200ms between attempts
         }
         
-        const response = await fetch(`${API_BASE_URL}/api/v1/search/history?limit=1`);
+        const response = await fetch(`${API_BASE_URL}/api/v1/search/history?limit=1`, {
+          headers: {
+            'Authorization': `Bearer ${localStorage.getItem('access_token')}`
+          }
+        });
         if (response.ok) {
           const data = await response.json();
           if (data.items && data.items.length > 0 && data.items[0].query === query) {
@@ -580,7 +723,10 @@ const App = () => {
     try {
       const response = await fetch(`${API_BASE_URL}/api/v1/search/notes`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('access_token')}`
+        },
         body: JSON.stringify({
           search_history_id: currentSearchId,
           entity_id: entityId,
@@ -2408,18 +2554,1542 @@ const App = () => {
     );
   };
 
+  // Admin state and functions
+  const [users, setUsers] = useState([]);
+  const [auditLogs, setAuditLogs] = useState([]);
+  const [showCreateUser, setShowCreateUser] = useState(false);
+  const [newUser, setNewUser] = useState({
+    email: '', username: '', password: '', full_name: '', role: 'viewer', organization: '', department: ''
+  });
+
+  // Helper function to update newUser fields without losing focus
+  const updateNewUserField = useCallback((field, value) => {
+    setNewUser(prevUser => {
+      // Only update if the value actually changed
+      if (prevUser[field] === value) {
+        return prevUser;
+      }
+      return {
+        ...prevUser,
+        [field]: value
+      };
+    });
+  }, []);
+
+  const fetchUsers = async () => {
+    if (!isAdmin) return;
+    try {
+      const token = localStorage.getItem('access_token');
+      const response = await fetch('/api/v1/auth/users', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setUsers(data);
+      }
+    } catch (error) {
+      console.error('Failed to fetch users:', error);
+    }
+  };
+
+  const fetchAuditLogs = async () => {
+    if (!isAdmin) return;
+    try {
+      const token = localStorage.getItem('access_token');
+      const response = await fetch('/api/v1/auth/audit-logs', {
+        headers: { 'Authorization': `Bearer ${token}` }
+      });
+      if (response.ok) {
+        const data = await response.json();
+        setAuditLogs(data.logs || []);
+      }
+    } catch (error) {
+      console.error('Failed to fetch audit logs:', error);
+    }
+  };
+
+  const createUser = async (e) => {
+    e.preventDefault();
+    try {
+      const token = localStorage.getItem('access_token');
+      const response = await fetch('/api/v1/auth/register', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify(newUser)
+      });
+      
+      if (response.ok) {
+        setShowCreateUser(false);
+        setNewUser({ email: '', username: '', password: '', full_name: '', role: 'viewer', organization: '', department: '' });
+        fetchUsers();
+      }
+    } catch (error) {
+      console.error('Failed to create user:', error);
+    }
+  };
+
+  // Load admin data when needed
+  useEffect(() => {
+    if (isAdmin && (activeTab === 'users' || activeTab === 'audit')) {
+      if (activeTab === 'users') fetchUsers();
+      if (activeTab === 'audit') fetchAuditLogs();
+    }
+  }, [activeTab, isAdmin]);
+
+  // Standalone User Management Component (Isolated from parent state)
+  const StandaloneUserManagement = memo(() => {
+    const [localUsers, setLocalUsers] = useState([]);
+    const [localAuditLogs, setLocalAuditLogs] = useState([]);
+    const [localShowCreateUser, setLocalShowCreateUser] = useState(false);
+    const [localNewUser, setLocalNewUser] = useState({
+      email: '', username: '', password: '', full_name: '', role: 'viewer', organization: '', department: ''
+    });
+    
+    // Advanced user management state
+    const [editingUser, setEditingUser] = useState(null);
+    const [showUserDetails, setShowUserDetails] = useState(null);
+    const [selectedUsers, setSelectedUsers] = useState([]);
+    const [userFilter, setUserFilter] = useState({ role: '', status: '', search: '' });
+
+    // Local helper function for updating form fields
+    const localUpdateNewUserField = useCallback((field, value) => {
+      setLocalNewUser(prevUser => {
+        if (prevUser[field] === value) {
+          return prevUser;
+        }
+        return {
+          ...prevUser,
+          [field]: value
+        };
+      });
+    }, []);
+
+    // Filter users based on current filters (memoized to prevent unnecessary re-renders)
+    const filteredUsers = useMemo(() => {
+      return localUsers.filter(user => {
+        const matchesRole = !userFilter.role || user.role === userFilter.role;
+        const matchesStatus = !userFilter.status || 
+          (userFilter.status === 'active' && user.is_active) ||
+          (userFilter.status === 'inactive' && !user.is_active);
+        const matchesSearch = !userFilter.search || 
+          user.full_name.toLowerCase().includes(userFilter.search.toLowerCase()) ||
+          user.email.toLowerCase().includes(userFilter.search.toLowerCase()) ||
+          user.username.toLowerCase().includes(userFilter.search.toLowerCase());
+        
+        return matchesRole && matchesStatus && matchesSearch;
+      });
+    }, [localUsers, userFilter]);
+
+    // Local fetch users function
+    const localFetchUsers = useCallback(async () => {
+      try {
+        const token = localStorage.getItem('access_token');
+        const response = await fetch('/api/v1/auth/users', {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        if (response.ok) {
+          const data = await response.json();
+          setLocalUsers(data);
+        }
+      } catch (error) {
+        console.error('Failed to fetch users:', error);
+      }
+    }, []);
+
+    // Load users on mount
+    useEffect(() => {
+      localFetchUsers();
+    }, [localFetchUsers]);
+
+    // Local create user function
+    const localCreateUser = useCallback(async (e) => {
+      e.preventDefault();
+      try {
+        const token = localStorage.getItem('access_token');
+        const response = await fetch('/api/v1/auth/register', {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(localNewUser)
+        });
+
+        if (response.ok) {
+          await localFetchUsers(); // Refresh list
+          setLocalNewUser({ email: '', username: '', password: '', full_name: '', role: 'viewer', organization: '', department: '' });
+          setLocalShowCreateUser(false);
+          alert('User created successfully');
+        } else {
+          const error = await response.json();
+          throw new Error(error.detail || 'Failed to create user');
+        }
+      } catch (error) {
+        alert(error.message);
+      }
+    }, [localNewUser, localFetchUsers]);
+
+    // User action handler (activate, deactivate, update, reset password)
+    const handleUserAction = useCallback(async (action, userId, data = {}) => {
+      try {
+        const token = localStorage.getItem('access_token');
+        let response;
+
+        switch (action) {
+          case 'activate':
+            response = await fetch(`/api/v1/auth/users/${userId}/activate`, {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${token}` }
+            });
+            break;
+          case 'deactivate':
+            response = await fetch(`/api/v1/auth/users/${userId}/deactivate`, {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${token}` }
+            });
+            break;
+          case 'update':
+            response = await fetch(`/api/v1/auth/users/${userId}`, {
+              method: 'PUT',
+              headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify(data)
+            });
+            break;
+          case 'resetPassword':
+            const newPassword = prompt('Enter new password for user:');
+            if (!newPassword) return;
+            const formData = new FormData();
+            formData.append('new_password', newPassword);
+            response = await fetch(`/api/v1/auth/users/${userId}/reset-password`, {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${token}`
+              },
+              body: formData
+            });
+            break;
+        }
+
+        if (response.ok) {
+          await localFetchUsers(); // Refresh user list
+          setEditingUser(null);
+          alert(`User ${action} successful`);
+        } else {
+          throw new Error(`Failed to ${action} user`);
+        }
+      } catch (error) {
+        alert(error.message);
+      }
+    }, [localFetchUsers]);
+
+    // Bulk actions handler
+    const handleBulkAction = useCallback(async (action) => {
+      if (selectedUsers.length === 0) {
+        alert('Please select users first');
+        return;
+      }
+
+      if (!confirm(`Are you sure you want to ${action} ${selectedUsers.length} user(s)?`)) {
+        return;
+      }
+
+      try {
+        const token = localStorage.getItem('access_token');
+        const response = await fetch(`/api/v1/auth/users/bulk-${action}`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(selectedUsers)
+        });
+
+        if (response.ok) {
+          const result = await response.json();
+          await localFetchUsers();
+          setSelectedUsers([]);
+          const count = result[`${action}d_count`] || result[`${action}_count`] || 0;
+          alert(`Bulk ${action}: ${count} users affected`);
+        } else {
+          throw new Error(`Bulk ${action} failed`);
+        }
+      } catch (error) {
+        alert(error.message);
+      }
+    }, [selectedUsers, localFetchUsers]);
+
+    // Get user activity
+    const getUserActivity = useCallback(async (userId) => {
+      try {
+        const token = localStorage.getItem('access_token');
+        const response = await fetch(`/api/v1/auth/users/${userId}/activity`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        
+        if (response.ok) {
+          const activity = await response.json();
+          setShowUserDetails(activity);
+        }
+      } catch (error) {
+        alert('Failed to load user activity');
+      }
+    }, []);
+
+    return (
+      <div className="space-y-6">
+        {/* Header */}
+        <div className="bg-gradient-to-r from-indigo-600 to-indigo-800 rounded-lg p-6 text-white">
+          <h2 className="text-2xl font-bold mb-2">User Management</h2>
+          <p className="text-indigo-100">Manage user accounts, permissions, and access</p>
+        </div>
+
+        {/* Controls */}
+        <div className="bg-white rounded-lg shadow p-6">
+          <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
+            <div className="flex flex-wrap items-center gap-4">
+              <input
+                type="text"
+                placeholder="Search users..."
+                value={userFilter.search}
+                onChange={(e) => setUserFilter({...userFilter, search: e.target.value})}
+                className="px-3 py-2 border border-gray-300 rounded-md text-sm"
+              />
+              <select
+                value={userFilter.role}
+                onChange={(e) => setUserFilter({...userFilter, role: e.target.value})}
+                className="px-3 py-2 border border-gray-300 rounded-md text-sm"
+              >
+                <option value="">All Roles</option>
+                <option value="admin">Admin</option>
+                <option value="compliance_officer">Compliance Officer</option>
+                <option value="analyst">Analyst</option>
+                <option value="viewer">Viewer</option>
+              </select>
+              <select
+                value={userFilter.status}
+                onChange={(e) => setUserFilter({...userFilter, status: e.target.value})}
+                className="px-3 py-2 border border-gray-300 rounded-md text-sm"
+              >
+                <option value="">All Status</option>
+                <option value="active">Active</option>
+                <option value="inactive">Inactive</option>
+              </select>
+            </div>
+            
+            <div className="flex items-center gap-2">
+              {selectedUsers.length > 0 && (
+                <>
+                  <button
+                    onClick={() => handleBulkAction('activate')}
+                    className="px-3 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 text-sm"
+                  >
+                    Activate ({selectedUsers.length})
+                  </button>
+                  <button
+                    onClick={() => handleBulkAction('deactivate')}
+                    className="px-3 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 text-sm"
+                  >
+                    Deactivate ({selectedUsers.length})
+                  </button>
+                </>
+              )}
+              <button
+                onClick={() => setLocalShowCreateUser(true)}
+                className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+              >
+                <Plus className="h-4 w-4 mr-2" />
+                Create User
+              </button>
+            </div>
+          </div>
+
+          {/* Create User Form */}
+          {localShowCreateUser && (
+            <CreateUserFormComponent
+              newUser={localNewUser}
+              updateNewUserField={localUpdateNewUserField}
+              onSubmit={localCreateUser}
+              onCancel={() => setLocalShowCreateUser(false)}
+            />
+          )}
+
+          {/* Advanced User List */}
+          <div className="space-y-4">
+            {filteredUsers.length > 0 ? (
+              filteredUsers.map((u) => (
+                <div key={u.id} className="border border-gray-200 rounded-lg p-4 hover:shadow-md transition-shadow">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-4">
+                      <input
+                        type="checkbox"
+                        checked={selectedUsers.includes(u.id)}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setSelectedUsers([...selectedUsers, u.id]);
+                          } else {
+                            setSelectedUsers(selectedUsers.filter(id => id !== u.id));
+                          }
+                        }}
+                        className="rounded border-gray-300"
+                      />
+                      <div className="flex-1">
+                        {editingUser === u.id ? (
+                          <EditUserForm 
+                            user={u} 
+                            onSave={(data) => handleUserAction('update', u.id, data)}
+                            onCancel={() => setEditingUser(null)}
+                          />
+                        ) : (
+                          <div>
+                            <h4 className="text-lg font-medium text-gray-900">{u.full_name}</h4>
+                            <p className="text-sm text-gray-500">{u.email} • @{u.username}</p>
+                            {u.organization && (
+                              <p className="text-sm text-gray-400">{u.organization} {u.department && `• ${u.department}`}</p>
+                            )}
+                            <div className="flex items-center space-x-2 mt-2">
+                              <span className={`inline-block px-2 py-1 rounded text-xs font-medium ${
+                                u.role === 'admin' ? 'bg-red-100 text-red-800' :
+                                u.role === 'compliance_officer' ? 'bg-purple-100 text-purple-800' :
+                                u.role === 'analyst' ? 'bg-blue-100 text-blue-800' :
+                                'bg-green-100 text-green-800'
+                              }`}>
+                                {u.role.replace('_', ' ').toUpperCase()}
+                              </span>
+                              <span className={`inline-block px-2 py-1 rounded text-xs font-medium ${
+                                u.is_active ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                              }`}>
+                                {u.is_active ? 'ACTIVE' : 'INACTIVE'}
+                              </span>
+                              {u.is_superuser && (
+                                <span className="inline-block px-2 py-1 rounded text-xs font-medium bg-yellow-100 text-yellow-800">
+                                  SUPERUSER
+                                </span>
+                              )}
+                              {u.last_login && (
+                                <span className="text-xs text-gray-400">
+                                  Last login: {new Date(u.last_login).toLocaleDateString()}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {editingUser !== u.id && (
+                      <div className="flex items-center space-x-2">
+                        <button
+                          onClick={() => getUserActivity(u.id)}
+                          className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded"
+                          title="View Activity"
+                        >
+                          <Activity className="h-4 w-4" />
+                        </button>
+                        <button
+                          onClick={() => setEditingUser(u.id)}
+                          className="p-2 text-gray-400 hover:text-green-600 hover:bg-green-50 rounded"
+                          title="Edit User"
+                        >
+                          <Edit className="h-4 w-4" />
+                        </button>
+                        <button
+                          onClick={() => handleUserAction('resetPassword', u.id)}
+                          className="p-2 text-gray-400 hover:text-yellow-600 hover:bg-yellow-50 rounded"
+                          title="Reset Password"
+                        >
+                          <Key className="h-4 w-4" />
+                        </button>
+                        {u.is_active ? (
+                          <button
+                            onClick={() => handleUserAction('deactivate', u.id)}
+                            className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded"
+                            title="Deactivate User"
+                          >
+                            <UserX className="h-4 w-4" />
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => handleUserAction('activate', u.id)}
+                            className="p-2 text-gray-400 hover:text-green-600 hover:bg-green-50 rounded"
+                            title="Activate User"
+                          >
+                            <UserCheck className="h-4 w-4" />
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="text-center py-8 text-gray-500">
+                {localUsers.length === 0 ? 'No users found' : 'No users match the current filters'}
+              </div>
+            )}
+          </div>
+
+          {/* User Details Modal */}
+          {showUserDetails && (
+            <UserDetailsModal 
+              userActivity={showUserDetails} 
+              onClose={() => setShowUserDetails(null)} 
+            />
+          )}
+        </div>
+      </div>
+    );
+  });
+
+  // Create User Form Component (Memoized to prevent re-renders)
+  const CreateUserFormComponent = memo(({ newUser, updateNewUserField, onSubmit, onCancel }) => (
+    <div className="mb-6 p-4 border border-gray-200 rounded-lg bg-gray-50">
+      <h3 className="text-md font-medium text-gray-900 mb-3">Create New User</h3>
+      <form onSubmit={onSubmit} className="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <input
+          key="create-full-name"
+          type="text"
+          placeholder="Full Name"
+          value={newUser.full_name}
+          onChange={(e) => updateNewUserField('full_name', e.target.value)}
+          className="px-3 py-2 border border-gray-300 rounded-md"
+          required
+        />
+        <input
+          key="create-email"
+          type="email"
+          placeholder="Email"
+          value={newUser.email}
+          onChange={(e) => updateNewUserField('email', e.target.value)}
+          className="px-3 py-2 border border-gray-300 rounded-md"
+          required
+        />
+        <input
+          key="create-username"
+          type="text"
+          placeholder="Username"
+          value={newUser.username}
+          onChange={(e) => updateNewUserField('username', e.target.value)}
+          className="px-3 py-2 border border-gray-300 rounded-md"
+          required
+        />
+        <input
+          key="create-password"
+          type="password"
+          placeholder="Password"
+          value={newUser.password}
+          onChange={(e) => updateNewUserField('password', e.target.value)}
+          className="px-3 py-2 border border-gray-300 rounded-md"
+          required
+        />
+        <input
+          key="create-organization"
+          type="text"
+          placeholder="Organization"
+          value={newUser.organization}
+          onChange={(e) => updateNewUserField('organization', e.target.value)}
+          className="px-3 py-2 border border-gray-300 rounded-md"
+        />
+        <input
+          key="create-department"
+          type="text"
+          placeholder="Department"
+          value={newUser.department}
+          onChange={(e) => updateNewUserField('department', e.target.value)}
+          className="px-3 py-2 border border-gray-300 rounded-md"
+        />
+        <select
+          key="create-role"
+          value={newUser.role}
+          onChange={(e) => updateNewUserField('role', e.target.value)}
+          className="px-3 py-2 border border-gray-300 rounded-md"
+        >
+          <option value="viewer">Viewer</option>
+          <option value="analyst">Analyst</option>
+          <option value="compliance_officer">Compliance Officer</option>
+          <option value="admin">Admin</option>
+        </select>
+        <div className="flex space-x-2">
+          <button
+            type="submit"
+            className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700"
+          >
+            Create User
+          </button>
+          <button
+            type="button"
+            onClick={onCancel}
+            className="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700"
+          >
+            Cancel
+          </button>
+        </div>
+      </form>
+    </div>
+  ));
+
+  // Admin Views
+  const UsersView = () => {
+    const [editingUser, setEditingUser] = useState(null);
+    const [showUserDetails, setShowUserDetails] = useState(null);
+    const [selectedUsers, setSelectedUsers] = useState([]);
+    const [userFilter, setUserFilter] = useState({ role: '', status: '', search: '' });
+
+    // Filter users based on current filters (memoized to prevent unnecessary re-renders)
+    const filteredUsers = useMemo(() => {
+      return users.filter(user => {
+        const matchesRole = !userFilter.role || user.role === userFilter.role;
+        const matchesStatus = !userFilter.status || 
+          (userFilter.status === 'active' && user.is_active) ||
+          (userFilter.status === 'inactive' && !user.is_active);
+        const matchesSearch = !userFilter.search || 
+          user.full_name.toLowerCase().includes(userFilter.search.toLowerCase()) ||
+          user.email.toLowerCase().includes(userFilter.search.toLowerCase()) ||
+          user.username.toLowerCase().includes(userFilter.search.toLowerCase());
+        
+        return matchesRole && matchesStatus && matchesSearch;
+      });
+    }, [users, userFilter]);
+
+    const handleUserAction = async (action, userId, data = {}) => {
+      try {
+        const token = localStorage.getItem('access_token');
+        let response;
+
+        switch (action) {
+          case 'activate':
+            response = await fetch(`${API_BASE_URL}/api/v1/auth/users/${userId}/activate`, {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${token}` }
+            });
+            break;
+          case 'deactivate':
+            response = await fetch(`${API_BASE_URL}/api/v1/auth/users/${userId}/deactivate`, {
+              method: 'POST',
+              headers: { 'Authorization': `Bearer ${token}` }
+            });
+            break;
+          case 'update':
+            response = await fetch(`${API_BASE_URL}/api/v1/auth/users/${userId}`, {
+              method: 'PUT',
+              headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify(data)
+            });
+            break;
+          case 'resetPassword':
+            const newPassword = prompt('Enter new password for user:');
+            if (!newPassword) return;
+            response = await fetch(`${API_BASE_URL}/api/v1/auth/users/${userId}/reset-password`, {
+              method: 'POST',
+              headers: {
+                'Authorization': `Bearer ${token}`,
+                'Content-Type': 'application/json'
+              },
+              body: JSON.stringify({ new_password: newPassword })
+            });
+            break;
+        }
+
+        if (response.ok) {
+          fetchUsers(); // Refresh user list
+          setEditingUser(null);
+          alert(`User ${action} successful`);
+        } else {
+          throw new Error(`Failed to ${action} user`);
+        }
+      } catch (error) {
+        alert(error.message);
+      }
+    };
+
+    const handleBulkAction = async (action) => {
+      if (selectedUsers.length === 0) {
+        alert('Please select users first');
+        return;
+      }
+
+      if (!confirm(`Are you sure you want to ${action} ${selectedUsers.length} user(s)?`)) {
+        return;
+      }
+
+      try {
+        const token = localStorage.getItem('access_token');
+        const response = await fetch(`${API_BASE_URL}/api/v1/auth/users/bulk-${action}`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({ user_ids: selectedUsers })
+        });
+
+        if (response.ok) {
+          const result = await response.json();
+          fetchUsers();
+          setSelectedUsers([]);
+          alert(`Bulk ${action}: ${result[action + 'd_count']} users affected`);
+        } else {
+          throw new Error(`Bulk ${action} failed`);
+        }
+      } catch (error) {
+        alert(error.message);
+      }
+    };
+
+    const getUserActivity = async (userId) => {
+      try {
+        const token = localStorage.getItem('access_token');
+        const response = await fetch(`${API_BASE_URL}/api/v1/auth/users/${userId}/activity`, {
+          headers: { 'Authorization': `Bearer ${token}` }
+        });
+        
+        if (response.ok) {
+          const activity = await response.json();
+          setShowUserDetails(activity);
+        }
+      } catch (error) {
+        alert('Failed to load user activity');
+      }
+    };
+
+    return (
+      <div className="space-y-6">
+        {/* Header */}
+        <div className="bg-gradient-to-r from-indigo-600 to-indigo-800 rounded-lg p-6 text-white">
+          <h2 className="text-2xl font-bold mb-2">User Management</h2>
+          <p className="text-indigo-100">Manage user accounts, permissions, and access</p>
+        </div>
+
+        {/* Controls */}
+        <div className="bg-white rounded-lg shadow p-6">
+          <div className="flex flex-wrap items-center justify-between gap-4 mb-4">
+            <div className="flex flex-wrap items-center gap-4">
+              <input
+                type="text"
+                placeholder="Search users..."
+                value={userFilter.search}
+                onChange={(e) => setUserFilter({...userFilter, search: e.target.value})}
+                className="px-3 py-2 border border-gray-300 rounded-md text-sm"
+              />
+              <select
+                value={userFilter.role}
+                onChange={(e) => setUserFilter({...userFilter, role: e.target.value})}
+                className="px-3 py-2 border border-gray-300 rounded-md text-sm"
+              >
+                <option value="">All Roles</option>
+                <option value="admin">Admin</option>
+                <option value="compliance_officer">Compliance Officer</option>
+                <option value="analyst">Analyst</option>
+                <option value="viewer">Viewer</option>
+              </select>
+              <select
+                value={userFilter.status}
+                onChange={(e) => setUserFilter({...userFilter, status: e.target.value})}
+                className="px-3 py-2 border border-gray-300 rounded-md text-sm"
+              >
+                <option value="">All Status</option>
+                <option value="active">Active</option>
+                <option value="inactive">Inactive</option>
+              </select>
+            </div>
+            
+            <div className="flex items-center gap-2">
+              {selectedUsers.length > 0 && (
+                <>
+                  <button
+                    onClick={() => handleBulkAction('activate')}
+                    className="px-3 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 text-sm"
+                  >
+                    Activate ({selectedUsers.length})
+                  </button>
+                  <button
+                    onClick={() => handleBulkAction('deactivate')}
+                    className="px-3 py-2 bg-red-600 text-white rounded-md hover:bg-red-700 text-sm"
+                  >
+                    Deactivate ({selectedUsers.length})
+                  </button>
+                </>
+              )}
+              <button
+                onClick={() => setShowCreateUser(true)}
+                className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+              >
+                <Plus className="h-4 w-4 mr-2" />
+                Create User
+              </button>
+            </div>
+          </div>
+
+          {/* Create User Form */}
+          {showCreateUser && (
+            <CreateUserFormComponent
+              newUser={newUser}
+              updateNewUserField={updateNewUserField}
+              onSubmit={createUser}
+              onCancel={() => setShowCreateUser(false)}
+            />
+          )}
+
+          {/* User List */}
+          <div className="space-y-4">
+            {filteredUsers.length > 0 ? (
+              filteredUsers.map((u) => (
+                <div key={u.id} className="border border-gray-200 rounded-lg p-4 hover:shadow-md transition-shadow">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-4">
+                      <input
+                        type="checkbox"
+                        checked={selectedUsers.includes(u.id)}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setSelectedUsers([...selectedUsers, u.id]);
+                          } else {
+                            setSelectedUsers(selectedUsers.filter(id => id !== u.id));
+                          }
+                        }}
+                        className="rounded border-gray-300"
+                      />
+                      <div className="flex-1">
+                        {editingUser === u.id ? (
+                          <EditUserForm 
+                            user={u} 
+                            onSave={(data) => handleUserAction('update', u.id, data)}
+                            onCancel={() => setEditingUser(null)}
+                          />
+                        ) : (
+                          <div>
+                            <h4 className="text-lg font-medium text-gray-900">{u.full_name}</h4>
+                            <p className="text-sm text-gray-500">{u.email} • @{u.username}</p>
+                            {u.organization && (
+                              <p className="text-sm text-gray-400">{u.organization} {u.department && `• ${u.department}`}</p>
+                            )}
+                            <div className="flex items-center space-x-2 mt-2">
+                              <span className={`inline-block px-2 py-1 rounded text-xs font-medium ${
+                                u.role === 'admin' ? 'bg-red-100 text-red-800' :
+                                u.role === 'compliance_officer' ? 'bg-purple-100 text-purple-800' :
+                                u.role === 'analyst' ? 'bg-blue-100 text-blue-800' :
+                                'bg-green-100 text-green-800'
+                              }`}>
+                                {u.role.replace('_', ' ').toUpperCase()}
+                              </span>
+                              <span className={`inline-block px-2 py-1 rounded text-xs font-medium ${
+                                u.is_active ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                              }`}>
+                                {u.is_active ? 'ACTIVE' : 'INACTIVE'}
+                              </span>
+                              {u.is_superuser && (
+                                <span className="inline-block px-2 py-1 rounded text-xs font-medium bg-yellow-100 text-yellow-800">
+                                  SUPERUSER
+                                </span>
+                              )}
+                              {u.last_login && (
+                                <span className="text-xs text-gray-400">
+                                  Last login: {new Date(u.last_login).toLocaleDateString()}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {editingUser !== u.id && (
+                      <div className="flex items-center space-x-2">
+                        <button
+                          onClick={() => getUserActivity(u.id)}
+                          className="p-2 text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded"
+                          title="View Activity"
+                        >
+                          <Activity className="h-4 w-4" />
+                        </button>
+                        <button
+                          onClick={() => setEditingUser(u.id)}
+                          className="p-2 text-gray-400 hover:text-green-600 hover:bg-green-50 rounded"
+                          title="Edit User"
+                        >
+                          <Edit className="h-4 w-4" />
+                        </button>
+                        <button
+                          onClick={() => handleUserAction('resetPassword', u.id)}
+                          className="p-2 text-gray-400 hover:text-yellow-600 hover:bg-yellow-50 rounded"
+                          title="Reset Password"
+                        >
+                          <Key className="h-4 w-4" />
+                        </button>
+                        {u.is_active ? (
+                          <button
+                            onClick={() => handleUserAction('deactivate', u.id)}
+                            className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded"
+                            title="Deactivate User"
+                          >
+                            <UserX className="h-4 w-4" />
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => handleUserAction('activate', u.id)}
+                            className="p-2 text-gray-400 hover:text-green-600 hover:bg-green-50 rounded"
+                            title="Activate User"
+                          >
+                            <UserCheck className="h-4 w-4" />
+                          </button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="text-center py-8 text-gray-500">
+                {users.length === 0 ? 'No users found' : 'No users match the current filters'}
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* User Details Modal */}
+        {showUserDetails && (
+          <UserDetailsModal 
+            userActivity={showUserDetails} 
+            onClose={() => setShowUserDetails(null)} 
+          />
+        )}
+      </div>
+    );
+  };
+
+  // Edit User Form Component (Memoized to prevent re-renders)
+  const EditUserForm = memo(({ user, onSave, onCancel }) => {
+    const [formData, setFormData] = useState({
+      full_name: user.full_name || '',
+      email: user.email || '',
+      username: user.username || '',
+      role: user.role || 'viewer',
+      organization: user.organization || '',
+      department: user.department || '',
+      is_active: user.is_active,
+      is_superuser: user.is_superuser
+    });
+
+    const updateFormField = useCallback((field, value) => {
+      setFormData(prevData => ({
+        ...prevData,
+        [field]: value
+      }));
+    }, []);
+
+    const handleSubmit = (e) => {
+      e.preventDefault();
+      onSave(formData);
+    };
+
+    return (
+      <form onSubmit={handleSubmit} className="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 bg-blue-50 rounded-lg">
+        <input
+          type="text"
+          placeholder="Full Name"
+          value={formData.full_name}
+          onChange={(e) => updateFormField('full_name', e.target.value)}
+          className="px-3 py-2 border border-gray-300 rounded-md"
+          required
+        />
+        <input
+          type="email"
+          placeholder="Email"
+          value={formData.email}
+          onChange={(e) => updateFormField('email', e.target.value)}
+          className="px-3 py-2 border border-gray-300 rounded-md"
+          required
+        />
+        <input
+          type="text"
+          placeholder="Username"
+          value={formData.username}
+          onChange={(e) => updateFormField('username', e.target.value)}
+          className="px-3 py-2 border border-gray-300 rounded-md"
+          required
+        />
+        <select
+          value={formData.role}
+          onChange={(e) => updateFormField('role', e.target.value)}
+          className="px-3 py-2 border border-gray-300 rounded-md"
+        >
+          <option value="viewer">Viewer</option>
+          <option value="analyst">Analyst</option>
+          <option value="compliance_officer">Compliance Officer</option>
+          <option value="admin">Admin</option>
+        </select>
+        <input
+          type="text"
+          placeholder="Organization"
+          value={formData.organization}
+          onChange={(e) => updateFormField('organization', e.target.value)}
+          className="px-3 py-2 border border-gray-300 rounded-md"
+        />
+        <input
+          type="text"
+          placeholder="Department"
+          value={formData.department}
+          onChange={(e) => updateFormField('department', e.target.value)}
+          className="px-3 py-2 border border-gray-300 rounded-md"
+        />
+        <div className="flex items-center space-x-4">
+          <label className="flex items-center">
+            <input
+              type="checkbox"
+              checked={formData.is_active}
+              onChange={(e) => updateFormField('is_active', e.target.checked)}
+              className="rounded border-gray-300 mr-2"
+            />
+            Active
+          </label>
+          <label className="flex items-center">
+            <input
+              type="checkbox"
+              checked={formData.is_superuser}
+              onChange={(e) => updateFormField('is_superuser', e.target.checked)}
+              className="rounded border-gray-300 mr-2"
+            />
+            Superuser
+          </label>
+        </div>
+        <div className="flex space-x-2">
+          <button
+            type="submit"
+            className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700"
+          >
+            Save Changes
+          </button>
+          <button
+            type="button"
+            onClick={onCancel}
+            className="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700"
+          >
+            Cancel
+          </button>
+        </div>
+      </form>
+    );
+  });
+
+  // User Details Modal Component
+  const UserDetailsModal = ({ userActivity, onClose }) => (
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+      <div className="bg-white rounded-lg max-w-4xl max-h-screen overflow-y-auto m-4 p-6">
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-xl font-bold">User Activity: {userActivity.user.full_name}</h3>
+          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+            <X className="h-6 w-6" />
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          {/* User Info */}
+          <div className="space-y-4">
+            <h4 className="text-lg font-semibold">User Information</h4>
+            <div className="space-y-2 text-sm">
+              <p><strong>Email:</strong> {userActivity.user.email}</p>
+              <p><strong>Username:</strong> {userActivity.user.username}</p>
+              <p><strong>Role:</strong> {userActivity.user.role}</p>
+              <p><strong>Organization:</strong> {userActivity.user.organization || 'N/A'}</p>
+              <p><strong>Department:</strong> {userActivity.user.department || 'N/A'}</p>
+              <p><strong>Created:</strong> {new Date(userActivity.user.created_at).toLocaleString()}</p>
+              <p><strong>Last Login:</strong> {userActivity.user.last_login ? new Date(userActivity.user.last_login).toLocaleString() : 'Never'}</p>
+            </div>
+          </div>
+
+          {/* Recent Searches */}
+          <div className="space-y-4">
+            <h4 className="text-lg font-semibold">Recent Searches</h4>
+            <div className="space-y-2 max-h-64 overflow-y-auto">
+              {userActivity.recent_searches.length > 0 ? (
+                userActivity.recent_searches.map((search) => (
+                  <div key={search.id} className="p-2 bg-gray-50 rounded text-sm">
+                    <div className="font-medium">{search.query}</div>
+                    <div className="text-gray-500">
+                      {search.results_count} results • {search.risk_level} risk • {new Date(search.created_at).toLocaleDateString()}
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <p className="text-gray-500">No recent searches</p>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Audit Logs */}
+        <div className="mt-6">
+          <h4 className="text-lg font-semibold mb-4">Recent Activity</h4>
+          <div className="space-y-2 max-h-64 overflow-y-auto">
+            {userActivity.audit_logs.length > 0 ? (
+              userActivity.audit_logs.map((log) => (
+                <div key={log.id} className="p-2 bg-gray-50 rounded text-sm">
+                  <div className="flex items-center justify-between">
+                    <span className={`px-2 py-1 rounded text-xs font-medium ${
+                      log.action.includes('FAILED') ? 'bg-red-100 text-red-800' :
+                      log.action.includes('SUCCESS') || log.action.includes('CREATE') ? 'bg-green-100 text-green-800' :
+                      'bg-blue-100 text-blue-800'
+                    }`}>
+                      {log.action}
+                    </span>
+                    <span className="text-gray-500">{new Date(log.timestamp).toLocaleString()}</span>
+                  </div>
+                  {log.ip_address && (
+                    <div className="text-gray-400 mt-1">IP: {log.ip_address}</div>
+                  )}
+                </div>
+              ))
+            ) : (
+              <p className="text-gray-500">No activity logs</p>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  // Profile Management View
+  const ProfileView = () => {
+    const [isEditing, setIsEditing] = useState(false);
+    const [isChangingPassword, setIsChangingPassword] = useState(false);
+    const [isLoadingProfile, setIsLoadingProfile] = useState(false);
+    const [currentUser, setCurrentUser] = useState(user); // Local copy of user data
+    const [profileForm, setProfileForm] = useState({
+      full_name: user?.full_name || '',
+      organization: user?.organization || '',
+      department: user?.department || ''
+    });
+    const [passwordForm, setPasswordForm] = useState({
+      old_password: '',
+      new_password: '',
+      confirm_password: ''
+    });
+
+    // Load current user info when component mounts
+    useEffect(() => {
+      const loadCurrentUser = async () => {
+        setIsLoadingProfile(true);
+        try {
+          const token = localStorage.getItem('access_token');
+          const response = await fetch(`${API_BASE_URL}/api/v1/auth/me`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+          });
+          
+          if (response.ok) {
+            const userData = await response.json();
+            setCurrentUser(userData);
+            localStorage.setItem('user', JSON.stringify(userData));
+            
+            // Update profile form with loaded data
+            setProfileForm({
+              full_name: userData.full_name || '',
+              organization: userData.organization || '',
+              department: userData.department || ''
+            });
+          }
+        } catch (error) {
+          console.error('Failed to load current user:', error);
+        } finally {
+          setIsLoadingProfile(false);
+        }
+      };
+
+      // Only load once when component mounts
+      loadCurrentUser();
+    }, []);  // Empty dependency array - only run once
+
+    const updateProfile = async (e) => {
+      e.preventDefault();
+      try {
+        const token = localStorage.getItem('access_token');
+        const response = await fetch(`${API_BASE_URL}/api/v1/auth/profile`, {
+          method: 'PUT',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify(profileForm)
+        });
+
+        if (response.ok) {
+          const updatedUser = await response.json();
+          setCurrentUser(updatedUser);
+          setUser(updatedUser); // Also update parent state
+          localStorage.setItem('user', JSON.stringify(updatedUser));
+          setIsEditing(false);
+          alert('Profile updated successfully');
+        } else {
+          throw new Error('Failed to update profile');
+        }
+      } catch (error) {
+        alert(error.message);
+      }
+    };
+
+    const changePassword = async (e) => {
+      e.preventDefault();
+      
+      if (passwordForm.new_password !== passwordForm.confirm_password) {
+        alert('New passwords do not match');
+        return;
+      }
+
+      if (passwordForm.new_password.length < 6) {
+        alert('Password must be at least 6 characters long');
+        return;
+      }
+
+      try {
+        const token = localStorage.getItem('access_token');
+        const response = await fetch(`${API_BASE_URL}/api/v1/auth/change-password`, {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            old_password: passwordForm.old_password,
+            new_password: passwordForm.new_password
+          })
+        });
+
+        if (response.ok) {
+          setIsChangingPassword(false);
+          setPasswordForm({ old_password: '', new_password: '', confirm_password: '' });
+          alert('Password changed successfully');
+        } else {
+          const error = await response.json();
+          throw new Error(error.detail || 'Failed to change password');
+        }
+      } catch (error) {
+        alert(error.message);
+      }
+    };
+
+    if (isLoadingProfile) {
+      return (
+        <div className="space-y-6">
+          <div className="bg-gradient-to-r from-green-600 to-green-800 rounded-lg p-6 text-white">
+            <h2 className="text-2xl font-bold mb-2">My Profile</h2>
+            <p className="text-green-100">Loading your profile information...</p>
+          </div>
+          <div className="bg-white rounded-lg shadow p-6 flex items-center justify-center">
+            <Loader2 className="h-8 w-8 animate-spin text-blue-600" />
+          </div>
+        </div>
+      );
+    }
+
+    return (
+      <div className="space-y-6">
+        {/* Header */}
+        <div className="bg-gradient-to-r from-green-600 to-green-800 rounded-lg p-6 text-white">
+          <h2 className="text-2xl font-bold mb-2">My Profile</h2>
+          <p className="text-green-100">Manage your account information and settings</p>
+        </div>
+
+        {/* Profile Information */}
+        <div className="bg-white rounded-lg shadow p-6">
+          <div className="flex items-center justify-between mb-6">
+            <h3 className="text-xl font-semibold text-gray-900">Profile Information</h3>
+            {!isEditing && (
+              <button
+                onClick={() => setIsEditing(true)}
+                className="flex items-center px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700"
+              >
+                <Edit className="h-4 w-4 mr-2" />
+                Edit Profile
+              </button>
+            )}
+          </div>
+
+          {isEditing ? (
+            <form onSubmit={updateProfile} className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Full Name</label>
+                  <input
+                    type="text"
+                    value={profileForm.full_name}
+                    onChange={(e) => setProfileForm({...profileForm, full_name: e.target.value})}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Organization</label>
+                  <input
+                    type="text"
+                    value={profileForm.organization}
+                    onChange={(e) => setProfileForm({...profileForm, organization: e.target.value})}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Department</label>
+                  <input
+                    type="text"
+                    value={profileForm.department}
+                    onChange={(e) => setProfileForm({...profileForm, department: e.target.value})}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-blue-500 focus:border-blue-500"
+                  />
+                </div>
+              </div>
+              <div className="flex space-x-2 pt-4">
+                <button
+                  type="submit"
+                  className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700"
+                >
+                  Save Changes
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsEditing(false);
+                    setProfileForm({
+                      full_name: currentUser?.full_name || '',
+                      organization: currentUser?.organization || '',
+                      department: currentUser?.department || ''
+                    });
+                  }}
+                  className="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700"
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          ) : (
+            <div className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <div>
+                  <label className="block text-sm font-medium text-gray-500">Full Name</label>
+                  <p className="text-lg text-gray-900">{currentUser?.full_name || 'Not provided'}</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-500">Email</label>
+                  <p className="text-lg text-gray-900">{currentUser?.email}</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-500">Username</label>
+                  <p className="text-lg text-gray-900">@{currentUser?.username}</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-500">Role</label>
+                  <span className={`inline-block px-2 py-1 rounded text-sm font-medium ${
+                    currentUser?.role === 'admin' ? 'bg-red-100 text-red-800' :
+                    currentUser?.role === 'compliance_officer' ? 'bg-purple-100 text-purple-800' :
+                    currentUser?.role === 'analyst' ? 'bg-blue-100 text-blue-800' :
+                    'bg-green-100 text-green-800'
+                  }`}>
+                    {currentUser?.role?.replace('_', ' ').toUpperCase()}
+                  </span>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-500">Organization</label>
+                  <p className="text-lg text-gray-900">{currentUser?.organization || 'Not provided'}</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-500">Department</label>
+                  <p className="text-lg text-gray-900">{currentUser?.department || 'Not provided'}</p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-500">Account Status</label>
+                  <span className={`inline-block px-2 py-1 rounded text-sm font-medium ${
+                    currentUser?.is_active ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                  }`}>
+                    {currentUser?.is_active ? 'ACTIVE' : 'INACTIVE'}
+                  </span>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-500">Member Since</label>
+                  <p className="text-lg text-gray-900">
+                    {currentUser?.created_at ? new Date(currentUser.created_at).toLocaleDateString() : 'Unknown'}
+                  </p>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-500">Last Login</label>
+                  <p className="text-lg text-gray-900">
+                    {currentUser?.last_login ? new Date(currentUser.last_login).toLocaleString() : 'Never'}
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Password Change */}
+        <div className="bg-white rounded-lg shadow p-6">
+          <div className="flex items-center justify-between mb-6">
+            <h3 className="text-xl font-semibold text-gray-900">Security</h3>
+            {!isChangingPassword && (
+              <button
+                onClick={() => setIsChangingPassword(true)}
+                className="flex items-center px-4 py-2 bg-yellow-600 text-white rounded-md hover:bg-yellow-700"
+              >
+                <Key className="h-4 w-4 mr-2" />
+                Change Password
+              </button>
+            )}
+          </div>
+
+          {isChangingPassword ? (
+            <form onSubmit={changePassword} className="space-y-4">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Current Password</label>
+                  <input
+                    type="password"
+                    value={passwordForm.old_password}
+                    onChange={(e) => setPasswordForm({...passwordForm, old_password: e.target.value})}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-yellow-500 focus:border-yellow-500"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">New Password</label>
+                  <input
+                    type="password"
+                    value={passwordForm.new_password}
+                    onChange={(e) => setPasswordForm({...passwordForm, new_password: e.target.value})}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-yellow-500 focus:border-yellow-500"
+                    minLength="6"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-2">Confirm New Password</label>
+                  <input
+                    type="password"
+                    value={passwordForm.confirm_password}
+                    onChange={(e) => setPasswordForm({...passwordForm, confirm_password: e.target.value})}
+                    className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-yellow-500 focus:border-yellow-500"
+                    minLength="6"
+                    required
+                  />
+                </div>
+              </div>
+              <div className="flex space-x-2 pt-4">
+                <button
+                  type="submit"
+                  className="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700"
+                >
+                  Change Password
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsChangingPassword(false);
+                    setPasswordForm({ old_password: '', new_password: '', confirm_password: '' });
+                  }}
+                  className="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700"
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          ) : (
+            <div className="space-y-4">
+              <p className="text-gray-600">Keep your account secure by regularly updating your password.</p>
+              <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4">
+                <h4 className="text-sm font-medium text-yellow-800 mb-2">Password Security Tips</h4>
+                <ul className="text-sm text-yellow-700 space-y-1">
+                  <li>• Use at least 8 characters with a mix of letters, numbers, and symbols</li>
+                  <li>• Avoid using personal information or common words</li>
+                  <li>• Don't reuse passwords from other accounts</li>
+                  <li>• Consider using a password manager</li>
+                </ul>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  const AuditView = () => (
+    <div className="bg-white rounded-lg shadow p-6">
+      <h2 className="text-lg font-semibold text-gray-900 mb-4">Audit Logs</h2>
+      <div className="space-y-4">
+        {auditLogs.map((log) => (
+          <div key={log.id} className="border border-gray-200 rounded-lg p-4">
+            <div className="flex items-start justify-between">
+              <div className="flex-1">
+                <div className="flex items-center space-x-2 mb-2">
+                  <span className={`inline-block px-2 py-1 rounded text-xs font-medium ${
+                    log.action.includes('FAILED') ? 'bg-red-100 text-red-800' :
+                    log.action.includes('SUCCESS') || log.action.includes('CREATE') ? 'bg-green-100 text-green-800' :
+                    'bg-blue-100 text-blue-800'
+                  }`}>
+                    {log.action}
+                  </span>
+                  <span className="text-sm text-gray-500">{log.user_email || 'System'}</span>
+                </div>
+                <div className="flex items-center space-x-4 text-xs text-gray-400">
+                  <span>{new Date(log.timestamp).toLocaleString()}</span>
+                  {log.ip_address && <span>IP: {log.ip_address}</span>}
+                </div>
+              </div>
+            </div>
+          </div>
+        ))}
+        {auditLogs.length === 0 && (
+          <p className="text-gray-500 text-center py-8">No audit logs found</p>
+        )}
+      </div>
+    </div>
+  );
+
+  const handleLogout = async () => {
+    try {
+      const token = localStorage.getItem('access_token');
+      await fetch('/api/v1/auth/logout', {
+        method: 'POST',
+        headers: { 'Authorization': `Bearer ${token}` },
+      });
+    } catch (err) {
+      console.error('Logout error:', err);
+    } finally {
+      localStorage.removeItem('access_token');
+      localStorage.removeItem('user');
+      window.location.reload();
+    }
+  };
+
   return (
     <div className="min-h-screen bg-gray-50">
       {/* Header */}
       <header className="bg-white shadow-sm border-b">
         <div className="max-w-7xl mx-auto px-4 py-4">
-          <div className="flex items-center gap-3">
-            <div className="bg-blue-600 p-2 rounded-lg">
-              <Search className="h-6 w-6 text-white" />
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="bg-blue-600 p-2 rounded-lg">
+                <Search className="h-6 w-6 text-white" />
+              </div>
+              <div>
+                <h1 className="text-xl font-bold text-gray-900">SanctionsGuard Pro</h1>
+                <p className="text-sm text-gray-600">Professional Sanctions Screening Platform</p>
+              </div>
             </div>
-            <div>
-              <h1 className="text-xl font-bold text-gray-900">SanctionsGuard Pro</h1>
-              <p className="text-sm text-gray-600">Professional Sanctions Screening Platform</p>
+            <div className="flex items-center space-x-4">
+              <div className="text-sm text-right">
+                <div className="text-gray-900 font-medium">{user?.full_name || user?.username || 'User'}</div>
+                <div className="text-gray-500 capitalize">{user?.role?.replace('_', ' ') || 'viewer'}</div>
+              </div>
+              <button
+                onClick={handleLogout}
+                className="text-gray-500 hover:text-gray-700 focus:outline-none p-2 rounded-md hover:bg-gray-100"
+                title="Logout"
+              >
+                <UserIcon className="h-5 w-5" />
+              </button>
             </div>
           </div>
         </div>
@@ -2433,7 +4103,8 @@ const App = () => {
               { id: 'dashboard', label: 'Dashboard', icon: Globe },
               { id: 'search', label: 'Search', icon: Search },
               { id: 'history', label: 'History', icon: History },
-              { id: 'reports', label: 'Reports', icon: FileText }
+              { id: 'reports', label: 'Reports', icon: FileText },
+              { id: 'profile', label: 'Profile', icon: UserIcon }
             ].map((tab) => (
               <button
                 key={tab.id}
@@ -2448,6 +4119,32 @@ const App = () => {
                 {tab.label}
               </button>
             ))}
+            {isAdmin && (
+              <>
+                <button
+                  onClick={() => setActiveTab('users')}
+                  className={`flex items-center gap-2 px-3 py-4 text-sm font-medium border-b-2 ${
+                    activeTab === 'users'
+                      ? 'border-blue-600 text-blue-600'
+                      : 'border-transparent text-gray-600 hover:text-gray-900 hover:border-gray-300'
+                  }`}
+                >
+                  <Users className="h-4 w-4" />
+                  Users
+                </button>
+                <button
+                  onClick={() => setActiveTab('audit')}
+                  className={`flex items-center gap-2 px-3 py-4 text-sm font-medium border-b-2 ${
+                    activeTab === 'audit'
+                      ? 'border-blue-600 text-blue-600'
+                      : 'border-transparent text-gray-600 hover:text-gray-900 hover:border-gray-300'
+                  }`}
+                >
+                  <Eye className="h-4 w-4" />
+                  Audit Logs
+                </button>
+              </>
+            )}
           </div>
         </div>
       </nav>
@@ -2458,12 +4155,23 @@ const App = () => {
         {activeTab === 'search' && <SearchView />}
         {activeTab === 'history' && <HistoryView />}
         {activeTab === 'reports' && <ReportsView />}
+        {activeTab === 'profile' && <ProfileView />}
+        {activeTab === 'users' && isAdmin && <StandaloneUserManagement />}
+        {activeTab === 'audit' && isAdmin && <AuditView />}
       </main>
 
       {/* Notes Modal */}
       <NotesModal />
     </div>
   );
+};
+
+// Main App Component with Authentication
+const App = () => {
+  const token = localStorage.getItem('access_token');
+  const isAuthenticated = !!token;
+
+  return isAuthenticated ? <MainApp /> : <LoginForm />;
 };
 
 export default App;

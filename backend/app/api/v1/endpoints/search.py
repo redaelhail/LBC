@@ -1,6 +1,6 @@
-# backend/app/api/v1/endpoints/search.py - Updated with better error handling
+# backend/app/api/v1/endpoints/search.py - Updated with authentication and audit logging
 
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -12,6 +12,10 @@ from app.database import get_db
 from app.models.search_history import SearchHistory
 from app.models.search_notes import SearchNote
 from app.models.starred_entity import StarredEntity
+from app.models.user import User
+from app.models.audit_log import AuditLog
+from app.core.auth import get_current_user
+from app.core.permissions import require_analyst_or_above, require_compliance_officer_or_above, can_search_entities
 from app.services.moroccan_entities import moroccan_entities_service
 
 logger = logging.getLogger(__name__)
@@ -69,7 +73,12 @@ class StarredEntityNotesRequest(BaseModel):
     notes: str
 
 @router.post("/entities")
-async def search_entities(request: SearchRequest, db: Session = Depends(get_db)) -> Dict[str, Any]:
+async def search_entities(
+    request: SearchRequest, 
+    http_request: Request,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst_or_above)
+) -> Dict[str, Any]:
     """Search for entities using OpenSanctions API with better error handling"""
     
     opensanctions_url = settings.OPENSANCTIONS_BASE_URL
@@ -131,32 +140,54 @@ async def search_entities(request: SearchRequest, db: Session = Depends(get_db))
             if response.status_code == 200:
                 opensanctions_data = response.json()
                 
-                # Enhance results with Morocco-specific scoring
+                # Use OpenSanctions results as-is, maintaining original order and scores
+                opensanctions_results = opensanctions_data.get("results", [])
+                
+                # Only add minimal risk assessment without changing OpenSanctions scores or order
                 enhanced_results = []
-                for entity in opensanctions_data.get("results", []):
-                    enhanced_entity = enhance_entity_for_morocco(entity)
+                for entity in opensanctions_results:
+                    # Keep original OpenSanctions entity completely intact
+                    enhanced_entity = {
+                        **entity,
+                        # Only add minimal risk level assessment without affecting core data
+                        "risk_level": get_risk_level_from_opensanctions_score(entity.get("score", 0)),
+                    }
                     enhanced_results.append(enhanced_entity)
+
+                # Add Moroccan entities only as supplementary data with very low priority
+                moroccan_matches = []
+                if len(enhanced_results) < request.limit:
+                    moroccan_search_filters = {
+                        "schema_filter": request.schema,
+                        "risk_level": request.risk_level,
+                        "political_party": request.political_party,
+                        "region": request.region,
+                        "position_type": request.position_type,
+                        "mandate_year": request.mandate_year
+                    }
+                    
+                    # Get moroccan entities but drastically reduce their influence
+                    raw_moroccan = moroccan_entities_service.search_entities_enhanced(
+                        request.query, 
+                        **moroccan_search_filters
+                    )
+                    
+                    # Mark moroccan entities as supplementary with very low scores
+                    for entity in raw_moroccan:
+                        # Ensure moroccan entities never outrank OpenSanctions
+                        entity["score"] = min(entity.get("score", 0) * 0.1, 0.1)  # Cap at 0.1
+                        entity["data_source"] = "moroccan_supplementary"
+                        entity["supplementary"] = True
+                    
+                    # Only add a few moroccan results if OpenSanctions has few results
+                    moroccan_matches = raw_moroccan[:2]  # Maximum 2 supplementary results
                 
-                # Add custom Moroccan entities with enhanced filtering
-                moroccan_search_filters = {
-                    "schema_filter": request.schema,
-                    "risk_level": request.risk_level,
-                    "political_party": request.political_party,
-                    "region": request.region,
-                    "position_type": request.position_type,
-                    "mandate_year": request.mandate_year
-                }
+                # Keep OpenSanctions results first, exactly as returned by their API
+                all_results = enhanced_results
+                if moroccan_matches and len(enhanced_results) < 5:  # Only add if OS has <5 results
+                    all_results.extend(moroccan_matches)
                 
-                moroccan_matches = moroccan_entities_service.search_entities_enhanced(
-                    request.query, 
-                    **moroccan_search_filters
-                )
-                
-                # Merge results, prioritizing by score
-                all_results = enhanced_results + moroccan_matches
-                all_results.sort(key=lambda x: x.get("score", 0), reverse=True)
-                
-                # Apply limit and offset to merged results
+                # Apply pagination without any additional sorting - preserve OpenSanctions order
                 start_idx = request.offset
                 end_idx = start_idx + request.limit
                 paginated_results = all_results[start_idx:end_idx]
@@ -165,16 +196,36 @@ async def search_entities(request: SearchRequest, db: Session = Depends(get_db))
                     "results": paginated_results,
                     "total": {"value": len(all_results)},
                     "opensanctions_total": opensanctions_data.get("total", {"value": len(enhanced_results)}),
-                    "moroccan_matches": len(moroccan_matches),
+                    "opensanctions_results": len(enhanced_results),
+                    "moroccan_supplementary": len(moroccan_matches),
                     "query": request.query,
                     "dataset": request.dataset,
-                    "source": "opensanctions+moroccan",
+                    "source": "opensanctions" if len(moroccan_matches) == 0 else "opensanctions+supplementary",
                     "api_url": f"{opensanctions_url}/search/{request.dataset}",
-                    "status": "success"
+                    "status": "success",
+                    "note": "Results ordered by OpenSanctions relevance with minimal supplementary data"
                 }
                 
                 # Save search to history (using all results)
-                await save_search_to_history(db, request, paginated_results, "opensanctions+moroccan")
+                history_source = "opensanctions" if len(moroccan_matches) == 0 else "opensanctions+supplementary"
+                await save_search_to_history(db, request, paginated_results, history_source, current_user.id)
+                
+                # Log audit action
+                audit_log = AuditLog(
+                    user_id=current_user.id,
+                    action="SEARCH_ENTITIES",
+                    resource=f"query:{request.query}",
+                    ip_address=http_request.client.host,
+                    user_agent=http_request.headers.get("user-agent"),
+                    extra_data={
+                        "dataset": request.dataset,
+                        "results_count": len(paginated_results),
+                        "opensanctions_results": len(enhanced_results),
+                        "moroccan_results": len(moroccan_matches)
+                    }
+                )
+                db.add(audit_log)
+                db.commit()
                 
                 return response_data
                 
@@ -289,7 +340,7 @@ async def check_opensanctions_health() -> Dict[str, Any]:
             "message": f"Health check failed: {str(e)}"
         }
 
-async def save_search_to_history(db: Session, request: SearchRequest, results: List[Dict], source: str):
+async def save_search_to_history(db: Session, request: SearchRequest, results: List[Dict], source: str, user_id: int):
     """Save search results to history database"""
     try:
         # Calculate risk metrics
@@ -311,7 +362,7 @@ async def save_search_to_history(db: Session, request: SearchRequest, results: L
             relevance_score=avg_relevance,
             data_source=source,
             results_data=results,  # Store full results for later reference
-            user_id=1  # Default user for now
+            user_id=user_id
         )
         
         db.add(history_entry)
@@ -416,14 +467,16 @@ def get_troubleshooting_tips(status: str) -> List[str]:
 async def get_search_history(
     limit: int = 50, 
     offset: int = 0, 
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """Get search history with pagination"""
     
     try:
-        # Try to get from database
-        total = db.query(SearchHistory).count()
+        # Filter by current user only
+        total = db.query(SearchHistory).filter(SearchHistory.user_id == current_user.id).count()
         searches = db.query(SearchHistory)\
+            .filter(SearchHistory.user_id == current_user.id)\
             .order_by(SearchHistory.created_at.desc())\
             .offset(offset)\
             .limit(limit)\
@@ -470,11 +523,18 @@ async def get_search_history(
         }
 
 @router.post("/notes")
-async def add_note(note_request: NoteRequest, db: Session = Depends(get_db)) -> Dict[str, Any]:
+async def add_note(
+    note_request: NoteRequest, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+) -> Dict[str, Any]:
     """Add a note to a specific search result entity"""
     try:
-        # Verify search history exists
-        search_history = db.query(SearchHistory).filter(SearchHistory.id == note_request.search_history_id).first()
+        # Verify search history exists and belongs to current user
+        search_history = db.query(SearchHistory).filter(
+            SearchHistory.id == note_request.search_history_id,
+            SearchHistory.user_id == current_user.id
+        ).first()
         if not search_history:
             raise HTTPException(status_code=404, detail="Search history not found")
         
@@ -486,7 +546,7 @@ async def add_note(note_request: NoteRequest, db: Session = Depends(get_db)) -> 
             note_text=note_request.note_text,
             risk_assessment=note_request.risk_assessment,
             action_taken=note_request.action_taken,
-            user_id=note_request.user_id
+            user_id=current_user.id  # Use authenticated user's ID
         )
         
         db.add(note)
@@ -507,10 +567,25 @@ async def add_note(note_request: NoteRequest, db: Session = Depends(get_db)) -> 
         raise HTTPException(status_code=500, detail="Failed to add note")
 
 @router.get("/notes/{search_history_id}")
-async def get_notes(search_history_id: int, db: Session = Depends(get_db)) -> Dict[str, Any]:
+async def get_notes(
+    search_history_id: int, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+) -> Dict[str, Any]:
     """Get all notes for a specific search history"""
     try:
-        notes = db.query(SearchNote).filter(SearchNote.search_history_id == search_history_id).all()
+        # Verify search belongs to current user and get notes from that search
+        search_history = db.query(SearchHistory).filter(
+            SearchHistory.id == search_history_id,
+            SearchHistory.user_id == current_user.id
+        ).first()
+        if not search_history:
+            raise HTTPException(status_code=404, detail="Search history not found")
+        
+        notes = db.query(SearchNote).filter(
+            SearchNote.search_history_id == search_history_id,
+            SearchNote.user_id == current_user.id
+        ).all()
         
         return {
             "notes": [
@@ -534,10 +609,17 @@ async def get_notes(search_history_id: int, db: Session = Depends(get_db)) -> Di
         raise HTTPException(status_code=500, detail="Failed to retrieve notes")
 
 @router.get("/history/{history_id}/details")
-async def get_search_details(history_id: int, db: Session = Depends(get_db)) -> Dict[str, Any]:
+async def get_search_details(
+    history_id: int, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+) -> Dict[str, Any]:
     """Get detailed search results with notes"""
     try:
-        search_history = db.query(SearchHistory).filter(SearchHistory.id == history_id).first()
+        search_history = db.query(SearchHistory).filter(
+            SearchHistory.id == history_id,
+            SearchHistory.user_id == current_user.id
+        ).first()
         if not search_history:
             raise HTTPException(status_code=404, detail="Search history not found")
         
@@ -582,14 +664,19 @@ async def get_search_details(history_id: int, db: Session = Depends(get_db)) -> 
 
 
 @router.post("/entities/star")
-async def star_entity(request: StarEntityRequest, db: Session = Depends(get_db)) -> Dict[str, Any]:
+async def star_entity(
+    request: StarEntityRequest, 
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+) -> Dict[str, Any]:
     """Star an individual entity from search results"""
     
     try:
-        # Check if entity is already starred in this search
+        # Check if entity is already starred by this user in this search
         existing = db.query(StarredEntity).filter(
             StarredEntity.entity_id == request.entity_id,
-            StarredEntity.search_history_id == request.search_history_id
+            StarredEntity.search_history_id == request.search_history_id,
+            StarredEntity.user_id == current_user.id
         ).first()
         
         if existing:
@@ -600,8 +687,11 @@ async def star_entity(request: StarEntityRequest, db: Session = Depends(get_db))
                 "message": "Entity is already starred"
             }
         
-        # Verify search history exists
-        search_history = db.query(SearchHistory).filter(SearchHistory.id == request.search_history_id).first()
+        # Verify search history exists and belongs to current user
+        search_history = db.query(SearchHistory).filter(
+            SearchHistory.id == request.search_history_id,
+            SearchHistory.user_id == current_user.id
+        ).first()
         if not search_history:
             raise HTTPException(status_code=404, detail="Search history not found")
         
@@ -614,7 +704,7 @@ async def star_entity(request: StarEntityRequest, db: Session = Depends(get_db))
             relevance_score=request.relevance_score,
             risk_level=request.risk_level,
             tags=request.tags,
-            user_id=request.user_id
+            user_id=current_user.id  # Use authenticated user's ID
         )
         
         db.add(starred_entity)
@@ -640,14 +730,16 @@ async def star_entity(request: StarEntityRequest, db: Session = Depends(get_db))
 async def unstar_entity(
     entity_id: str, 
     search_history_id: int, 
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """Remove star from an entity"""
     
     try:
         starred_entity = db.query(StarredEntity).filter(
             StarredEntity.entity_id == entity_id,
-            StarredEntity.search_history_id == search_history_id
+            StarredEntity.search_history_id == search_history_id,
+            StarredEntity.user_id == current_user.id
         ).first()
         
         if not starred_entity:
@@ -673,15 +765,17 @@ async def unstar_entity(
 async def get_starred_entities(
     limit: int = 50, 
     offset: int = 0, 
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """Get all starred entities with search context"""
     
     try:
         from sqlalchemy.orm import joinedload
         
-        total = db.query(StarredEntity).count()
+        total = db.query(StarredEntity).filter(StarredEntity.user_id == current_user.id).count()
         starred_entities = db.query(StarredEntity)\
+            .filter(StarredEntity.user_id == current_user.id)\
             .options(joinedload(StarredEntity.search_history))\
             .order_by(StarredEntity.starred_at.desc())\
             .offset(offset)\
@@ -734,13 +828,17 @@ async def get_starred_entities(
 @router.get("/entities/starred/search/{search_history_id}")
 async def get_starred_entities_for_search(
     search_history_id: int, 
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """Get starred entities for a specific search"""
     
     try:
         starred_entities = db.query(StarredEntity)\
-            .filter(StarredEntity.search_history_id == search_history_id)\
+            .filter(
+                StarredEntity.search_history_id == search_history_id,
+                StarredEntity.user_id == current_user.id
+            )\
             .all()
         
         # Return a set of entity_ids for quick lookup
@@ -765,13 +863,17 @@ async def get_starred_entities_for_search(
 async def update_starred_entity_notes(
     starred_entity_id: int,
     request: StarredEntityNotesRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """Add or update notes for a starred entity"""
     
     try:
-        # Check if starred entity exists
-        starred_entity = db.query(StarredEntity).filter(StarredEntity.id == starred_entity_id).first()
+        # Check if starred entity exists and belongs to current user
+        starred_entity = db.query(StarredEntity).filter(
+            StarredEntity.id == starred_entity_id,
+            StarredEntity.user_id == current_user.id
+        ).first()
         if not starred_entity:
             raise HTTPException(status_code=404, detail="Starred entity not found")
         
@@ -797,7 +899,8 @@ async def update_starred_entity_notes(
 @router.get("/reports/starred-entities")
 async def generate_starred_entities_report(
     format: str = "json",
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """Generate comprehensive report of all starred entities"""
     
@@ -805,8 +908,9 @@ async def generate_starred_entities_report(
         from datetime import datetime
         from sqlalchemy.orm import joinedload
         
-        # Get all starred entities with search context
+        # Get current user's starred entities with search context
         starred_entities = db.query(StarredEntity)\
+            .filter(StarredEntity.user_id == current_user.id)\
             .options(joinedload(StarredEntity.search_history))\
             .order_by(StarredEntity.starred_at.desc())\
             .all()
@@ -860,7 +964,7 @@ async def generate_starred_entities_report(
         report_summary = {
             "total_starred_entities": len(starred_entities),
             "risk_distribution": risk_distribution,
-            "avg_risk_score": sum(e.risk_score or 0 for e in starred_entities) / len(starred_entities) if starred_entities else 0,
+            "avg_risk_score": sum(e.relevance_score or 0 for e in starred_entities) / len(starred_entities) if starred_entities else 0,
             "date_range": {
                 "earliest": starred_entities[-1].starred_at.isoformat() if starred_entities else None,
                 "latest": starred_entities[0].starred_at.isoformat() if starred_entities else None
@@ -881,49 +985,53 @@ async def generate_starred_entities_report(
         raise HTTPException(status_code=500, detail="Failed to generate report")
 
 @router.get("/analytics")
-async def get_search_analytics(db: Session = Depends(get_db)) -> Dict[str, Any]:
+async def get_search_analytics(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+) -> Dict[str, Any]:
     """Get comprehensive search analytics"""
     try:
         from sqlalchemy import func, text
         from datetime import datetime, timedelta
         
-        # Basic stats
-        total_searches = db.query(SearchHistory).count()
-        starred_entities_count = db.query(StarredEntity).count()
+        # Basic stats - filtered by current user
+        total_searches = db.query(SearchHistory).filter(SearchHistory.user_id == current_user.id).count()
+        starred_entities_count = db.query(StarredEntity).filter(StarredEntity.user_id == current_user.id).count()
         
-        # Risk level distribution
+        # Risk level distribution - filtered by current user
         risk_stats = db.query(
             SearchHistory.risk_level,
             func.count(SearchHistory.id).label('count')
-        ).group_by(SearchHistory.risk_level).all()
+        ).filter(SearchHistory.user_id == current_user.id).group_by(SearchHistory.risk_level).all()
         
-        # Data source stats
+        # Data source stats - filtered by current user
         source_stats = db.query(
             SearchHistory.data_source,
             func.count(SearchHistory.id).label('count')
-        ).group_by(SearchHistory.data_source).all()
+        ).filter(SearchHistory.user_id == current_user.id).group_by(SearchHistory.data_source).all()
         
-        # Recent activity (last 7 days)
+        # Recent activity (last 7 days) - filtered by current user
         week_ago = datetime.utcnow() - timedelta(days=7)
         recent_activity = db.query(
             func.date(SearchHistory.created_at).label('date'),
             func.count(SearchHistory.id).label('count')
         ).filter(
-            SearchHistory.created_at >= week_ago
+            SearchHistory.created_at >= week_ago,
+            SearchHistory.user_id == current_user.id
         ).group_by(func.date(SearchHistory.created_at)).all()
         
-        # Top queries
+        # Top queries - filtered by current user
         top_queries = db.query(
             SearchHistory.query,
             func.count(SearchHistory.id).label('count'),
             func.max(SearchHistory.created_at).label('last_searched')
-        ).group_by(SearchHistory.query).order_by(func.count(SearchHistory.id).desc()).limit(10).all()
+        ).filter(SearchHistory.user_id == current_user.id).group_by(SearchHistory.query).order_by(func.count(SearchHistory.id).desc()).limit(10).all()
         
-        # Average risk scores
-        avg_risk_score = db.query(func.avg(SearchHistory.risk_score)).scalar() or 0
+        # Average risk scores - filtered by current user
+        avg_risk_score = db.query(func.avg(SearchHistory.risk_score)).filter(SearchHistory.user_id == current_user.id).scalar() or 0
         
-        # Performance stats
-        avg_execution_time = db.query(func.avg(SearchHistory.execution_time_ms)).scalar() or 0
+        # Performance stats - filtered by current user
+        avg_execution_time = db.query(func.avg(SearchHistory.execution_time_ms)).filter(SearchHistory.user_id == current_user.id).scalar() or 0
         
         return {
             "summary": {
@@ -1086,6 +1194,13 @@ def get_risk_level(score: float) -> str:
     elif score >= 50: return "MEDIUM"
     else: return "LOW"
 
+def get_risk_level_from_opensanctions_score(score: float) -> str:
+    """Convert OpenSanctions score (0.0-1.0) to risk level without modification"""
+    score_percent = score * 100
+    if score_percent >= 80: return "HIGH"
+    elif score_percent >= 50: return "MEDIUM"
+    else: return "LOW"
+
 def get_recommended_action(score: float) -> str:
     if score >= 80:
         return "Enhanced Due Diligence Required - Consider blocking transaction"
@@ -1137,13 +1252,17 @@ def generate_mock_results(query: str) -> List[Dict[str, Any]]:
 @router.delete("/history/{search_id}")
 async def delete_search_history(
     search_id: int,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """Delete a search history entry and all associated data"""
     
     try:
-        # Check if search exists
-        search = db.query(SearchHistory).filter(SearchHistory.id == search_id).first()
+        # Check if search exists and belongs to current user
+        search = db.query(SearchHistory).filter(
+            SearchHistory.id == search_id,
+            SearchHistory.user_id == current_user.id
+        ).first()
         if not search:
             raise HTTPException(status_code=404, detail="Search not found")
         
@@ -1169,13 +1288,17 @@ async def delete_search_history(
 async def update_search_notes(
     search_id: int,
     request: SearchNotesRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """Add or update notes for a search history entry"""
     
     try:
-        # Check if search exists
-        search = db.query(SearchHistory).filter(SearchHistory.id == search_id).first()
+        # Check if search exists and belongs to current user
+        search = db.query(SearchHistory).filter(
+            SearchHistory.id == search_id,
+            SearchHistory.user_id == current_user.id
+        ).first()
         if not search:
             raise HTTPException(status_code=404, detail="Search not found")
         
@@ -1200,21 +1323,24 @@ async def update_search_notes(
 @router.get("/reports/starred-entities/enhanced")
 async def generate_enhanced_starred_report(
     format: str = "json",
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
 ) -> Dict[str, Any]:
     """Generate enhanced report with full OpenSanctions details"""
     
     try:
         from sqlalchemy.orm import joinedload
         
-        # Get all starred entities with full context
+        # Get current user's starred entities with full context
         starred_entities = db.query(StarredEntity)\
+            .filter(StarredEntity.user_id == current_user.id)\
             .options(joinedload(StarredEntity.search_history))\
             .order_by(StarredEntity.starred_at.desc())\
             .all()
         
-        # Get all search history with full data
+        # Get current user's search history with full data
         search_histories = db.query(SearchHistory)\
+            .filter(SearchHistory.user_id == current_user.id)\
             .order_by(SearchHistory.created_at.desc())\
             .all()
         
@@ -1242,7 +1368,7 @@ async def generate_enhanced_starred_report(
             risk_level = entity.risk_level or "LOW"
             report_data["risk_analysis"]["risk_distribution"][risk_level] += 1
             
-            risk_score = entity.risk_score or 0
+            risk_score = entity.relevance_score or 0
             total_risk_score += risk_score
             
             if risk_score > highest_risk_score:
@@ -1369,7 +1495,10 @@ async def generate_enhanced_starred_report(
         raise HTTPException(status_code=500, detail="Failed to generate enhanced report")
 
 @router.get("/reports/starred-entities/csv")
-async def export_starred_entities_csv(db: Session = Depends(get_db)):
+async def export_starred_entities_csv(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     """Export starred entities report as CSV"""
     
     try:
@@ -1378,8 +1507,9 @@ async def export_starred_entities_csv(db: Session = Depends(get_db)):
         import io
         from sqlalchemy.orm import joinedload
         
-        # Get starred entities
+        # Get current user's starred entities
         starred_entities = db.query(StarredEntity)\
+            .filter(StarredEntity.user_id == current_user.id)\
             .options(joinedload(StarredEntity.search_history))\
             .order_by(StarredEntity.starred_at.desc())\
             .all()
@@ -1457,7 +1587,7 @@ async def export_starred_entities_csv(db: Session = Depends(get_db)):
             writer.writerow([
                 entity.entity_id,
                 entity.entity_name,
-                entity.risk_score or 0,
+                entity.relevance_score or 0,
                 entity.risk_level or 'LOW',
                 entity.tags or '',
                 entity.search_history.query,
@@ -1509,21 +1639,31 @@ async def export_starred_entities_csv(db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail="Failed to export CSV")
 
 @router.get("/reports/starred-entities/pdf")
-async def export_starred_entities_pdf(db: Session = Depends(get_db)):
+async def export_starred_entities_pdf(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
     """Export starred entities report as PDF"""
     
     try:
         from fastapi.responses import StreamingResponse
-        from reportlab.lib.pagesizes import letter, A4
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-        from reportlab.lib.units import inch
-        from reportlab.lib import colors
-        from sqlalchemy.orm import joinedload
+        from datetime import datetime
         import io
         
-        # Get starred entities
+        try:
+            from reportlab.lib.pagesizes import letter, A4
+            from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+            from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+            from reportlab.lib.units import inch
+            from reportlab.lib import colors
+        except ImportError:
+            raise HTTPException(status_code=500, detail="PDF generation library not available. Please install reportlab.")
+        
+        from sqlalchemy.orm import joinedload
+        
+        # Get current user's starred entities
         starred_entities = db.query(StarredEntity)\
+            .filter(StarredEntity.user_id == current_user.id)\
             .options(joinedload(StarredEntity.search_history))\
             .order_by(StarredEntity.starred_at.desc())\
             .all()
@@ -1585,7 +1725,7 @@ async def export_starred_entities_pdf(db: Session = Depends(get_db)):
                 
                 # Basic information
                 entity_details = [
-                    ['Risk Score:', f"{entity.risk_score or 0}%"],
+                    ['Risk Score:', f"{entity.relevance_score or 0}%"],
                     ['Risk Level:', entity.risk_level or 'LOW'],
                     ['Entity Type:', entity_info.get('schema', 'Unknown')],
                     ['Search Query:', entity.search_history.query],
