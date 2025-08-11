@@ -15,7 +15,7 @@ export default defineConfig({
     allowedHosts: true,
     proxy: {
       '/api': {
-        target: 'http://localhost:8000',
+        target: 'http://sanctionsguard-backend:8000',
         changeOrigin: true,
         secure: false,
         rewrite: (path) => path.replace(/^\/api/, '/api'),
