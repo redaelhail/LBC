@@ -180,7 +180,8 @@ class BatchProcessingService:
         entities: List[Dict[str, Any]], 
         dataset: str = "default",
         user_id: int = 1,
-        date_filters: Optional[Dict[str, str]] = None
+        date_filters: Optional[Dict[str, str]] = None,
+        limit: int = 20
     ) -> BatchJobResult:
         """
         Process batch screening for multiple entities
@@ -209,7 +210,7 @@ class BatchProcessingService:
             
             for i in range(0, len(entities), batch_size):
                 batch_entities = entities[i:i + batch_size]
-                batch_results = await self._process_entity_batch(batch_entities, dataset, job_id, date_filters)
+                batch_results = await self._process_entity_batch(batch_entities, dataset, job_id, date_filters, limit)
                 
                 for entity_result in batch_results:
                     processed += 1
@@ -257,7 +258,8 @@ class BatchProcessingService:
         entities: List[Dict[str, Any]], 
         dataset: str,
         job_id: str,
-        date_filters: Optional[Dict[str, str]] = None
+        date_filters: Optional[Dict[str, str]] = None,
+        limit: int = 20
     ) -> List[Dict[str, Any]]:
         """
         Process a single batch of entities
@@ -277,7 +279,7 @@ class BatchProcessingService:
             # Create tasks for parallel processing
             tasks = []
             for entity in entities:
-                task = self._screen_single_entity(client, entity, dataset, opensanctions_url, job_id, date_filters)
+                task = self._screen_single_entity(client, entity, dataset, opensanctions_url, job_id, date_filters, limit)
                 tasks.append(task)
             
             # Process all entities in parallel
@@ -308,7 +310,8 @@ class BatchProcessingService:
         dataset: str,
         opensanctions_url: str,
         job_id: str,
-        date_filters: Optional[Dict[str, str]] = None
+        date_filters: Optional[Dict[str, str]] = None,
+        limit: int = 20
     ) -> Dict[str, Any]:
         """
         Screen a single entity against OpenSanctions
@@ -330,7 +333,7 @@ class BatchProcessingService:
             # Prepare search parameters
             params = {
                 "q": entity_name,
-                "limit": 20,
+                "limit": limit,
                 "fuzzy": True,
                 "simple": True,
                 "facets": ["countries", "topics", "datasets"]

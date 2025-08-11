@@ -2167,6 +2167,7 @@ async def process_batch_screening(
     changed_since: Optional[str] = None,
     date_from: Optional[str] = None,
     date_to: Optional[str] = None,
+    limit: int = 20,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_analyst_or_above)
 ) -> Dict[str, Any]:
@@ -2210,7 +2211,7 @@ async def process_batch_screening(
         
         # Process batch screening
         batch_result = await batch_processing_service.process_batch_screening(
-            entities, dataset, current_user.id, date_filters
+            entities, dataset, current_user.id, date_filters, limit
         )
         
         # Save batch processing to search history
