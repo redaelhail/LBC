@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, memo, useMemo } from 'react';
-import { Search, User, Building, AlertCircle, CheckCircle, Loader2, History, FileText, Globe, Calendar, Download, Eye, Plus, Edit, Trash2, Save, X, MessageSquare, Star, Filter, TrendingUp, BarChart3, Activity, Clock, Target, Shield, UserIcon, Settings, Users, UserX, UserCheck, Key } from 'lucide-react';
+import { Search, User, Building, AlertCircle, CheckCircle, Loader2, History, FileText, Globe, Calendar, Download, Eye, Plus, Edit, Trash2, Save, X, MessageSquare, Star, Filter, TrendingUp, BarChart3, Activity, Clock, Shield, UserIcon, Settings, Users, UserX, UserCheck, Key, Building2, Target, Upload } from 'lucide-react';
+import EntityManagement from './components/EntityManagement';
+import BatchUpload from './components/BatchUpload';
 
 // Simple Login Component
 const LoginForm = () => {
@@ -96,7 +98,7 @@ const LoginForm = () => {
 // Move SearchInput outside the main component to prevent recreation
 const SearchInput = React.memo(({ 
   inputRef, 
-  placeholder = "Enter name, company, or ID number...", 
+  placeholder = "Enter name, company, or ID (fuzzy matching enabled)...", 
   onSearch,
   disabled 
 }) => {
@@ -209,6 +211,8 @@ const MainApp = () => {
   const [currentSearchId, setCurrentSearchId] = useState(null);
   const [showInlineNoteForm, setShowInlineNoteForm] = useState(null);
   const [editingStarredNote, setEditingStarredNote] = useState(null); // ID of starred entity being edited
+  const [confirmUnstar, setConfirmUnstar] = useState(null); // Entity to confirm unstarring
+  const [confirmDialog, setConfirmDialog] = useState(null); // Generic confirmation dialog
   const [analytics, setAnalytics] = useState(null);
   const [historyFilter, setHistoryFilter] = useState('all'); // all, starred, high-risk, etc.
   const [expandedDetails, setExpandedDetails] = useState(new Set()); // Track which results have expanded details
@@ -226,9 +230,10 @@ const MainApp = () => {
     role: '',
     country: '',
     entity_type: 'Person',
-    search_type: 'exact',
+    search_type: 'fuzzy',  // Default to fuzzy search for better results
     dataset: '',
-    fuzzy: false
+    fuzzy: true,  // Enable OpenSanctions fuzzy matching by default
+    simple: true  // Enable simple syntax for better user experience
   });
   
   // Refs to maintain focus
@@ -323,6 +328,47 @@ const MainApp = () => {
       }
     } catch (error) {
       console.error('Failed to unstar entity:', error);
+    }
+  };
+
+  const unstarEntityFromReports = async (starredEntity) => {
+    try {
+      const token = localStorage.getItem('access_token');
+      if (!token) {
+        console.error('No authentication token available');
+        return;
+      }
+
+      console.log('Attempting to unstar entity:', {
+        entity_id: starredEntity.entity_id,
+        search_id: starredEntity.search_context.search_id,
+        entity_name: starredEntity.entity_name
+      });
+
+      const response = await fetch(`${API_BASE_URL}/api/v1/search/entities/star/${starredEntity.entity_id}/search/${starredEntity.search_context.search_id}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      
+      if (response.ok) {
+        const result = await response.json();
+        console.log('Unstar API response:', result);
+        
+        // Remove from starred entities list
+        setStarredEntities(prev => prev.filter(entity => entity.id !== starredEntity.id));
+        console.log(`✅ Successfully unstarred entity: ${starredEntity.entity_name}`);
+        
+        // Close confirmation modal
+        setConfirmUnstar(null);
+      } else {
+        const errorText = await response.text();
+        console.error('Failed to unstar entity:', response.status, errorText);
+      }
+    } catch (error) {
+      console.error('❌ Error unstarring entity:', error);
     }
   };
 
@@ -454,10 +500,30 @@ const MainApp = () => {
     }
   };
 
+  const showConfirmDialog = (title, message, onConfirm, confirmText = 'Confirm', variant = 'danger') => {
+    setConfirmDialog({
+      title,
+      message,
+      onConfirm,
+      confirmText,
+      variant
+    });
+  };
+
   const deleteSearchHistory = async (searchId) => {
-    if (!window.confirm('Are you sure you want to delete this search? This will also remove all associated starred entities and notes.')) {
-      return;
-    }
+    showConfirmDialog(
+      'Delete Search History',
+      'Are you sure you want to delete this search? This will also remove all associated starred entities and notes.',
+      async () => {
+        // Continue with deletion
+        await performDeleteSearchHistory(searchId);
+        setConfirmDialog(null);
+      },
+      'Delete Search'
+    );
+  };
+
+  const performDeleteSearchHistory = async (searchId) => {
     
     try {
       const response = await fetch(`${API_BASE_URL}/api/v1/search/history/${searchId}`, {
@@ -560,15 +626,21 @@ const MainApp = () => {
     
     try {
       
-      // Build request body with search parameters
+      // Build request body with enhanced search parameters
       const requestBody = { 
         query: query,
         dataset: searchFilters.dataset || 'default',
-        limit: 10,
+        limit: 20,  // Increase limit for better results
+        // Always enable fuzzy and simple mode for better matching
+        fuzzy: true,
+        simple: true,
         // Add non-empty filters
         ...(searchFilters.entity_type && { schema: searchFilters.entity_type }),
         ...(searchFilters.country && { countries: [searchFilters.country] }),
-        ...(searchFilters.fuzzy && { fuzzy: true })
+        // Enhanced search options
+        ...(searchFilters.topics && { topics: searchFilters.topics }),
+        facets: ["countries", "topics", "datasets"],
+        filter_op: "OR"
       };
       
       const token = localStorage.getItem('access_token');
@@ -627,6 +699,24 @@ const MainApp = () => {
   const getRelevanceScore = (result) => {
     return result.score ? Math.round(result.score * 100) : 
            result.relevance_score || 0;
+  };
+
+  const getMatchConfidence = (result) => {
+    return result.match_confidence || 0;
+  };
+
+  const getMatchType = (result) => {
+    return result.match_type || 'unknown';
+  };
+
+  const getMatchTypeColor = (matchType) => {
+    switch (matchType) {
+      case 'exact': return 'text-green-800 bg-green-100';
+      case 'fuzzy': return 'text-blue-800 bg-blue-100';
+      case 'phonetic': return 'text-purple-800 bg-purple-100';
+      case 'no_match': return 'text-gray-600 bg-gray-100';
+      default: return 'text-gray-600 bg-gray-100';
+    }
   };
 
   const formatDate = (dateString) => {
@@ -760,8 +850,8 @@ const MainApp = () => {
     <div className="space-y-6">
       {/* Header */}
       <div className="bg-gradient-to-r from-blue-600 to-blue-800 rounded-lg p-6 text-white">
-        <h2 className="text-2xl font-bold mb-2">Compliance Dashboard</h2>
-        <p className="text-blue-100">Real-time sanctions screening analytics and insights</p>
+        <h2 className="text-2xl font-bold mb-2">SanctionsGuard Pro Dashboard</h2>
+        <p className="text-blue-100">Sanctions & PEP screening platform for ACAPS insurance intermediaries</p>
       </div>
 
       {/* Key Metrics */}
@@ -927,6 +1017,52 @@ const MainApp = () => {
           <p className="text-gray-500 text-center py-8">No search data available</p>
         )}
       </div>
+
+      {/* Welcome Section - Show when no search data */}
+      {(!analytics || !analytics?.summary?.total_searches || analytics.summary.total_searches === 0) && (
+        <div className="bg-gradient-to-br from-blue-50 to-indigo-50 p-8 rounded-lg border border-blue-200">
+          <div className="text-center">
+            <Shield className="mx-auto h-16 w-16 text-blue-600 mb-4" />
+            <h3 className="text-2xl font-bold text-gray-900 mb-4">Welcome to SanctionsGuard Pro</h3>
+            <p className="text-gray-600 mb-8 max-w-2xl mx-auto">
+              Your comprehensive sanctions and PEP screening platform for ACAPS insurance intermediaries. 
+              Start by performing your first search to identify potential risks and ensure compliance.
+            </p>
+            
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+              <div className="text-center">
+                <div className="bg-white p-4 rounded-full w-16 h-16 mx-auto mb-3 flex items-center justify-center shadow-sm">
+                  <Search className="h-8 w-8 text-blue-600" />
+                </div>
+                <h4 className="font-semibold text-gray-900 mb-2">Search & Screen</h4>
+                <p className="text-sm text-gray-600">
+                  Search for individuals and entities against sanctions lists and PEP databases
+                </p>
+              </div>
+              
+              <div className="text-center">
+                <div className="bg-white p-4 rounded-full w-16 h-16 mx-auto mb-3 flex items-center justify-center shadow-sm">
+                  <Shield className="h-8 w-8 text-red-600" />
+                </div>
+                <h4 className="font-semibold text-gray-900 mb-2">Risk Assessment</h4>
+                <p className="text-sm text-gray-600">
+                  Automatically assess and categorize risk levels for screening results
+                </p>
+              </div>
+              
+              <div className="text-center">
+                <div className="bg-white p-4 rounded-full w-16 h-16 mx-auto mb-3 flex items-center justify-center shadow-sm">
+                  <FileText className="h-8 w-8 text-green-600" />
+                </div>
+                <h4 className="font-semibold text-gray-900 mb-2">Compliance Reports</h4>
+                <p className="text-sm text-gray-600">
+                  Generate detailed reports and maintain audit trails for regulatory compliance
+                </p>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Quick Search */}
       <div className="bg-white p-6 rounded-lg shadow-sm border">
@@ -1282,6 +1418,9 @@ const MainApp = () => {
                           getRiskColor(getRelevanceScore(result))
                         }`}>
                           Relevance: {getRelevanceScore(result)}%
+                        </span>
+                        <span className={`px-2 py-1 rounded text-xs font-medium ${getMatchTypeColor(getMatchType(result))}`}>
+                          {getMatchType(result).charAt(0).toUpperCase() + getMatchType(result).slice(1)} ({getMatchConfidence(result)}%)
                         </span>
                         <span className="px-3 py-1 bg-blue-100 text-blue-800 rounded-full text-sm font-medium">
                           {result.schema || 'Entity'}
@@ -2299,15 +2438,25 @@ const MainApp = () => {
                               <MessageSquare className="h-4 w-4" />
                               Compliance Notes
                             </h5>
-                            {editingStarredNote !== entity.id && (
+                            <div className="flex gap-2">
+                              {editingStarredNote !== entity.id && (
+                                <button
+                                  onClick={() => startEditingStarredNote(entity.id)}
+                                  className="px-3 py-1 bg-purple-600 text-white text-xs rounded hover:bg-purple-700 transition-colors"
+                                  title="Add/edit compliance notes"
+                                >
+                                  {entity.notes ? 'Edit Notes' : 'Add Notes'}
+                                </button>
+                              )}
                               <button
-                                onClick={() => startEditingStarredNote(entity.id)}
-                                className="px-3 py-1 bg-purple-600 text-white text-xs rounded hover:bg-purple-700 transition-colors"
-                                title="Add/edit compliance notes"
+                                onClick={() => setConfirmUnstar(entity)}
+                                className="px-3 py-1 bg-red-600 text-white text-xs rounded hover:bg-red-700 transition-colors flex items-center gap-1"
+                                title="Remove from starred entities"
                               >
-                                {entity.notes ? 'Edit Notes' : 'Add Notes'}
+                                <X className="h-3 w-3" />
+                                Unstar
                               </button>
-                            )}
+                            </div>
                           </div>
                           
                           {editingStarredNote === entity.id ? (
@@ -2418,6 +2567,9 @@ const MainApp = () => {
                             getRiskColor(getRelevanceScore(result))
                           }`}>
                             Relevance: {getRelevanceScore(result)}%
+                          </span>
+                          <span className={`px-2 py-1 rounded text-xs font-medium ${getMatchTypeColor(getMatchType(result))}`}>
+                            {getMatchType(result).charAt(0).toUpperCase() + getMatchType(result).slice(1)} ({getMatchConfidence(result)}%)
                           </span>
                         </div>
                         
@@ -2795,10 +2947,18 @@ const MainApp = () => {
         return;
       }
 
-      if (!confirm(`Are you sure you want to ${action} ${selectedUsers.length} user(s)?`)) {
-        return;
-      }
+      showConfirmDialog(
+        `${action.charAt(0).toUpperCase() + action.slice(1)} Users`,
+        `Are you sure you want to ${action} ${selectedUsers.length} user(s)?`,
+        async () => {
+          await performBulkAction(action);
+          setConfirmDialog(null);
+        },
+        `${action.charAt(0).toUpperCase() + action.slice(1)} Users`
+      );
+    }, [selectedUsers]);
 
+    const performBulkAction = async (action) => {
       try {
         const token = localStorage.getItem('access_token');
         const response = await fetch(`/api/v1/auth/users/bulk-${action}`, {
@@ -2822,7 +2982,7 @@ const MainApp = () => {
       } catch (error) {
         alert(error.message);
       }
-    }, [selectedUsers, localFetchUsers]);
+    };
 
     // Get user activity
     const getUserActivity = useCallback(async (userId) => {
@@ -3216,9 +3376,18 @@ const MainApp = () => {
         return;
       }
 
-      if (!confirm(`Are you sure you want to ${action} ${selectedUsers.length} user(s)?`)) {
-        return;
-      }
+      showConfirmDialog(
+        `${action.charAt(0).toUpperCase() + action.slice(1)} Users`,
+        `Are you sure you want to ${action} ${selectedUsers.length} user(s)?`,
+        async () => {
+          await performBulkActionStandalone(action);
+          setConfirmDialog(null);
+        },
+        `${action.charAt(0).toUpperCase() + action.slice(1)} Users`
+      );
+    };
+
+    const performBulkActionStandalone = async (action) => {
 
       try {
         const token = localStorage.getItem('access_token');
@@ -4101,9 +4270,11 @@ const MainApp = () => {
           <div className="flex space-x-8">
             {[
               { id: 'dashboard', label: 'Dashboard', icon: Globe },
-              { id: 'search', label: 'Search', icon: Search },
-              { id: 'history', label: 'History', icon: History },
-              { id: 'reports', label: 'Reports', icon: FileText },
+              { id: 'search', label: 'Sanctions & PEP Screening', icon: Search },
+              { id: 'batch', label: 'Batch Upload', icon: Upload },
+              { id: 'entities', label: 'Sanctioned Entities', icon: Building2 },
+              { id: 'history', label: 'Search History', icon: History },
+              { id: 'reports', label: 'Reports', icon: BarChart3 },
               { id: 'profile', label: 'Profile', icon: UserIcon }
             ].map((tab) => (
               <button
@@ -4153,6 +4324,8 @@ const MainApp = () => {
       <main className="max-w-7xl mx-auto px-4 py-8">
         {activeTab === 'dashboard' && <DashboardView />}
         {activeTab === 'search' && <SearchView />}
+        {activeTab === 'batch' && <BatchUpload />}
+        {activeTab === 'entities' && <EntityManagement />}
         {activeTab === 'history' && <HistoryView />}
         {activeTab === 'reports' && <ReportsView />}
         {activeTab === 'profile' && <ProfileView />}
@@ -4162,6 +4335,94 @@ const MainApp = () => {
 
       {/* Notes Modal */}
       <NotesModal />
+      
+      {/* Unstar Confirmation Modal */}
+      {confirmUnstar && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4 shadow-xl">
+            <div className="flex items-center gap-3 mb-4">
+              <div className="bg-red-100 p-2 rounded-full">
+                <X className="h-6 w-6 text-red-600" />
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900">Remove Starred Entity</h3>
+                <p className="text-sm text-gray-600">This action cannot be undone</p>
+              </div>
+            </div>
+            
+            <div className="mb-6">
+              <p className="text-gray-700">
+                Are you sure you want to unstar <strong>"{confirmUnstar.entity_name}"</strong>? 
+                This will remove it from your starred entities list and any associated compliance notes.
+              </p>
+              <div className="mt-3 p-3 bg-gray-50 rounded-lg text-sm text-gray-600">
+                <div>From search: "{confirmUnstar.search_context.query}"</div>
+                <div>Starred: {formatDate(confirmUnstar.starred_at)}</div>
+              </div>
+            </div>
+            
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setConfirmUnstar(null)}
+                className="px-4 py-2 bg-gray-200 text-gray-800 rounded hover:bg-gray-300 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => unstarEntityFromReports(confirmUnstar)}
+                className="px-4 py-2 bg-red-600 text-white rounded hover:bg-red-700 transition-colors flex items-center gap-2"
+              >
+                <X className="h-4 w-4" />
+                Remove Star
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      
+      {/* Generic Confirmation Dialog */}
+      {confirmDialog && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4 shadow-xl">
+            <div className="flex items-center gap-3 mb-4">
+              <div className={`p-2 rounded-full ${
+                confirmDialog.variant === 'danger' ? 'bg-red-100' : 'bg-blue-100'
+              }`}>
+                <AlertCircle className={`h-6 w-6 ${
+                  confirmDialog.variant === 'danger' ? 'text-red-600' : 'text-blue-600'
+                }`} />
+              </div>
+              <div>
+                <h3 className="text-lg font-semibold text-gray-900">{confirmDialog.title}</h3>
+                <p className="text-sm text-gray-600">This action cannot be undone</p>
+              </div>
+            </div>
+            
+            <div className="mb-6">
+              <p className="text-gray-700">{confirmDialog.message}</p>
+            </div>
+            
+            <div className="flex justify-end gap-3">
+              <button
+                onClick={() => setConfirmDialog(null)}
+                className="px-4 py-2 bg-gray-200 text-gray-800 rounded hover:bg-gray-300 transition-colors"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={confirmDialog.onConfirm}
+                className={`px-4 py-2 text-white rounded transition-colors ${
+                  confirmDialog.variant === 'danger' 
+                    ? 'bg-red-600 hover:bg-red-700' 
+                    : 'bg-blue-600 hover:bg-blue-700'
+                }`}
+              >
+                {confirmDialog.confirmText}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

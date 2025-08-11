@@ -1,11 +1,14 @@
 # backend/app/api/v1/endpoints/search.py - Updated with authentication and audit logging
 
-from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi import APIRouter, HTTPException, Depends, Request, UploadFile, File
+from fastapi.responses import StreamingResponse
 from typing import Dict, Any, List, Optional
 from pydantic import BaseModel
+import io
 from sqlalchemy.orm import Session
 import httpx
 import asyncio
+import json
 import logging
 from app.core.config import settings
 from app.database import get_db
@@ -17,6 +20,8 @@ from app.models.audit_log import AuditLog
 from app.core.auth import get_current_user
 from app.core.permissions import require_analyst_or_above, require_compliance_officer_or_above, can_search_entities
 from app.services.moroccan_entities import moroccan_entities_service
+from app.services.fuzzy_matching import fuzzy_matching_service
+from app.services.batch_processing import batch_processing_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -36,10 +41,12 @@ class SearchRequest(BaseModel):
     changed_since: Optional[str] = None
     datasets: Optional[List[str]] = None
     sort: Optional[List[str]] = None
-    fuzzy: bool = False
-    simple: bool = False
+    fuzzy: bool = True  # Enable OpenSanctions fuzzy matching by default
+    simple: bool = True  # Use simple syntax for better user experience
     facets: Optional[List[str]] = ["countries", "topics", "datasets"]
     filter_op: str = "OR"  # OR or AND for combining filters
+    # OpenSanctions specific parameters
+    filter: Optional[str] = None  # Field-specific filters using "field:value" syntax
     # Morocco-specific filters
     risk_level: Optional[List[str]] = None
     political_party: Optional[str] = None
@@ -79,6 +86,7 @@ async def search_entities(
     db: Session = Depends(get_db),
     current_user: User = Depends(require_analyst_or_above)
 ) -> Dict[str, Any]:
+    """Enhanced search with multi-strategy approach using OpenSanctions fuzzy + fallback"""
     """Search for entities using OpenSanctions API with better error handling"""
     
     opensanctions_url = settings.OPENSANCTIONS_BASE_URL
@@ -126,14 +134,59 @@ async def search_entities(
             params["datasets"] = request.datasets
         if request.sort:
             params["sort"] = request.sort
+        if request.filter:
+            params["filter"] = request.filter
             
-        logger.info(f"Searching OpenSanctions API: {opensanctions_url}/search/{request.dataset}")
+        logger.info(f"Searching OpenSanctions API: {opensanctions_url}/search/{request.dataset} with fuzzy={request.fuzzy}, simple={request.simple}")
         
         async with httpx.AsyncClient(timeout=30.0) as client:
+            # Try the main search first
             response = await client.get(
                 f"{opensanctions_url}/search/{request.dataset}",
                 params=params
             )
+            
+            # If we get few results, try additional search strategies
+            if response.status_code == 200:
+                initial_data = response.json()
+                initial_results = initial_data.get("results", [])
+                
+                # If we have very few high-quality results, try additional queries
+                if len(initial_results) < 5:
+                    # Generate query variations for better matching
+                    query_variations = fuzzy_matching_service.extract_name_variations(request.query)
+                    additional_results = []
+                    
+                    for variation in query_variations[:3]:  # Try up to 3 variations
+                        if variation != request.query and len(variation.strip()) > 2:
+                            logger.info(f"Trying search variation: {variation}")
+                            var_params = {**params, "q": variation}
+                            var_response = await client.get(
+                                f"{opensanctions_url}/search/{request.dataset}",
+                                params=var_params
+                            )
+                            
+                            if var_response.status_code == 200:
+                                var_data = var_response.json()
+                                var_results = var_data.get("results", [])
+                                # Add results that aren't already in initial_results
+                                for result in var_results:
+                                    if not any(r.get("id") == result.get("id") for r in initial_results):
+                                        additional_results.append({
+                                            **result,
+                                            "search_variation": variation,
+                                            "is_variation_result": True
+                                        })
+                    
+                    # Combine results, keeping original first
+                    if additional_results:
+                        initial_results.extend(additional_results[:10])  # Add up to 10 additional
+                        initial_data["results"] = initial_results
+                        initial_data["total"]["value"] = len(initial_results)
+                        logger.info(f"Enhanced search found {len(additional_results)} additional results from variations")
+                
+                # Continue with the enhanced results
+                response._content = json.dumps(initial_data).encode()
             
             logger.info(f"OpenSanctions response status: {response.status_code}")
             
@@ -143,14 +196,39 @@ async def search_entities(
                 # Use OpenSanctions results as-is, maintaining original order and scores
                 opensanctions_results = opensanctions_data.get("results", [])
                 
-                # Only add minimal risk assessment without changing OpenSanctions scores or order
+                # Add fuzzy matching analysis without changing OpenSanctions scores or order
                 enhanced_results = []
                 for entity in opensanctions_results:
-                    # Keep original OpenSanctions entity completely intact
+                    # Perform fuzzy matching analysis
+                    entity_name = entity.get("caption", "")
+                    entity_aliases = []
+                    
+                    # Extract aliases from properties if available
+                    if entity.get("properties") and entity["properties"].get("alias"):
+                        entity_aliases = entity["properties"]["alias"]
+                    
+                    # Calculate fuzzy match confidence
+                    fuzzy_result = fuzzy_matching_service.match_names(
+                        request.query, 
+                        entity_name, 
+                        entity_aliases
+                    )
+                    
+                    # Keep original OpenSanctions entity completely intact, add fuzzy analysis
                     enhanced_entity = {
                         **entity,
-                        # Only add minimal risk level assessment without affecting core data
+                        # Original OpenSanctions score and data preserved
                         "risk_level": get_risk_level_from_opensanctions_score(entity.get("score", 0)),
+                        # Add fuzzy matching insights
+                        "match_confidence": round(fuzzy_result.score, 2),
+                        "match_type": fuzzy_result.match_type,
+                        "match_details": {
+                            "normalized_query": fuzzy_result.normalized_query,
+                            "normalized_target": fuzzy_result.normalized_target,
+                            "algorithm_scores": {
+                                k: round(v, 2) for k, v in fuzzy_result.algorithm_scores.items()
+                            }
+                        }
                     }
                     enhanced_results.append(enhanced_entity)
 
@@ -172,12 +250,33 @@ async def search_entities(
                         **moroccan_search_filters
                     )
                     
-                    # Mark moroccan entities as supplementary with very low scores
+                    # Mark moroccan entities as supplementary with fuzzy matching
                     for entity in raw_moroccan:
+                        # Calculate fuzzy matching for Moroccan entities
+                        entity_name = entity.get("caption", "") or entity.get("name", "")
+                        entity_aliases = entity.get("aliases", [])
+                        
+                        fuzzy_result = fuzzy_matching_service.match_names(
+                            request.query, 
+                            entity_name, 
+                            entity_aliases
+                        )
+                        
                         # Ensure moroccan entities never outrank OpenSanctions
                         entity["score"] = min(entity.get("score", 0) * 0.1, 0.1)  # Cap at 0.1
                         entity["data_source"] = "moroccan_supplementary"
                         entity["supplementary"] = True
+                        
+                        # Add fuzzy matching insights
+                        entity["match_confidence"] = round(fuzzy_result.score, 2)
+                        entity["match_type"] = fuzzy_result.match_type
+                        entity["match_details"] = {
+                            "normalized_query": fuzzy_result.normalized_query,
+                            "normalized_target": fuzzy_result.normalized_target,
+                            "algorithm_scores": {
+                                k: round(v, 2) for k, v in fuzzy_result.algorithm_scores.items()
+                            }
+                        }
                     
                     # Only add a few moroccan results if OpenSanctions has few results
                     moroccan_matches = raw_moroccan[:2]  # Maximum 2 supplementary results
@@ -203,7 +302,7 @@ async def search_entities(
                     "source": "opensanctions" if len(moroccan_matches) == 0 else "opensanctions+supplementary",
                     "api_url": f"{opensanctions_url}/search/{request.dataset}",
                     "status": "success",
-                    "note": "Results ordered by OpenSanctions relevance with minimal supplementary data"
+                    "note": "Results ordered by OpenSanctions relevance with fuzzy matching confidence scores"
                 }
                 
                 # Save search to history (using all results)
@@ -1998,4 +2097,399 @@ def get_moroccan_filter_options() -> Dict[str, Any]:
         ]
     }
 
+# Batch Processing Models
+class BatchValidateRequest(BaseModel):
+    template_type: str = "screening"  # screening, enhanced_screening
+    
+class BatchProcessRequest(BaseModel):
+    dataset: str = "default"
+    template_type: str = "screening"
+
 from datetime import datetime
+
+# Batch Processing Endpoints
+
+@router.post("/batch/validate")
+async def validate_batch_template(
+    file: UploadFile = File(...),
+    template_type: str = "screening",
+    current_user: User = Depends(require_analyst_or_above)
+) -> Dict[str, Any]:
+    """Validate uploaded Excel template for batch processing"""
+    
+    try:
+        # Check file type
+        if not file.filename.endswith(('.xlsx', '.xls')):
+            raise HTTPException(status_code=400, detail="Only Excel files (.xlsx, .xls) are supported")
+        
+        # Read file content
+        file_content = await file.read()
+        
+        if len(file_content) == 0:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty")
+        
+        # Validate template
+        validation_result = batch_processing_service.validate_excel_template(file_content, template_type)
+        
+        return {
+            "filename": file.filename,
+            "file_size": len(file_content),
+            "template_type": template_type,
+            "validation": validation_result,
+            "status": "validated"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error validating batch template: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to validate template: {str(e)}")
+
+@router.post("/batch/process")
+async def process_batch_screening(
+    request: Request,
+    file: UploadFile = File(...),
+    dataset: str = "default",
+    template_type: str = "screening",
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst_or_above)
+) -> Dict[str, Any]:
+    """Process batch screening for uploaded Excel file"""
+    
+    try:
+        # Validate file
+        if not file.filename.endswith(('.xlsx', '.xls')):
+            raise HTTPException(status_code=400, detail="Only Excel files (.xlsx, .xls) are supported")
+        
+        file_content = await file.read()
+        if len(file_content) == 0:
+            raise HTTPException(status_code=400, detail="Uploaded file is empty")
+        
+        # Validate template first
+        validation_result = batch_processing_service.validate_excel_template(file_content, template_type)
+        if not validation_result["valid"]:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Template validation failed: {validation_result.get('error', 'Unknown validation error')}"
+            )
+        
+        # Parse entities from Excel
+        entities = batch_processing_service.parse_excel_data(file_content)
+        
+        if len(entities) == 0:
+            raise HTTPException(status_code=400, detail="No valid entities found in uploaded file")
+        
+        logger.info(f"Starting batch processing for {len(entities)} entities from {file.filename}")
+        
+        # Process batch screening
+        batch_result = await batch_processing_service.process_batch_screening(
+            entities, dataset, current_user.id
+        )
+        
+        # Save batch processing to search history
+        await save_batch_to_history(db, batch_result, file.filename, current_user.id)
+        
+        # Log audit action
+        audit_log = AuditLog(
+            user_id=current_user.id,
+            action="BATCH_SCREENING",
+            resource=f"file:{file.filename}",
+            ip_address=request.client.host,
+            user_agent=request.headers.get("user-agent"),
+            extra_data={
+                "filename": file.filename,
+                "template_type": template_type,
+                "dataset": dataset,
+                "entities_count": len(entities),
+                "successful_count": batch_result.successful_records,
+                "failed_count": batch_result.failed_records,
+                "processing_time_ms": batch_result.processing_time_ms,
+                "job_id": batch_result.job_id
+            }
+        )
+        db.add(audit_log)
+        db.commit()
+        
+        return {
+            "job_id": batch_result.job_id,
+            "filename": file.filename,
+            "template_type": template_type,
+            "dataset": dataset,
+            "summary": {
+                "total_records": batch_result.total_records,
+                "processed_records": batch_result.processed_records,
+                "successful_records": batch_result.successful_records,
+                "failed_records": batch_result.failed_records,
+                "processing_time_ms": batch_result.processing_time_ms,
+                "status": batch_result.status
+            },
+            "results_preview": batch_result.results[:5],  # First 5 results as preview
+            "errors_preview": batch_result.errors[:5],    # First 5 errors as preview
+            "has_more_results": len(batch_result.results) > 5,
+            "has_more_errors": len(batch_result.errors) > 5,
+            "status": "completed"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error processing batch screening: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to process batch screening: {str(e)}")
+
+@router.get("/batch/template/download")
+async def download_batch_template(
+    template_type: str = "screening",
+    current_user: User = Depends(require_analyst_or_above)
+):
+    """Download Excel template for batch screening"""
+    
+    try:
+        import pandas as pd
+        
+        # Define template columns for different types
+        templates = {
+            "screening": {
+                "columns": ["name", "type"],
+                "sample_data": [
+                    {"name": "John Smith", "type": "Person"},
+                    {"name": "ACME Corporation", "type": "Company"},
+                    {"name": "Example Organization", "type": "Organization"}
+                ]
+            },
+            "enhanced_screening": {
+                "columns": ["name", "type", "date_of_birth", "place_of_birth", "nationality", "country", "reference_id"],
+                "sample_data": [
+                    {
+                        "name": "John Smith", 
+                        "type": "Person", 
+                        "date_of_birth": "1980-01-01",
+                        "place_of_birth": "New York, USA",
+                        "nationality": "US",
+                        "country": "US",
+                        "reference_id": "REF001"
+                    },
+                    {
+                        "name": "ACME Corporation", 
+                        "type": "Company",
+                        "date_of_birth": "",
+                        "place_of_birth": "",
+                        "nationality": "",
+                        "country": "US",
+                        "reference_id": "REF002"
+                    }
+                ]
+            }
+        }
+        
+        template_config = templates.get(template_type, templates["screening"])
+        
+        # Create DataFrame with sample data
+        df = pd.DataFrame(template_config["sample_data"])
+        
+        # Create Excel file in memory
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            # Write template with sample data
+            df.to_excel(writer, sheet_name='Template', index=False)
+            
+            # Add instructions sheet
+            instructions = [
+                ["Field", "Description", "Required", "Valid Values"],
+                ["name", "Full name of person or entity", "Yes", "Any text"],
+                ["type", "Type of entity", "Yes", "Person, Company, Organization"],
+                ["date_of_birth", "Date of birth (for persons)", "No", "YYYY-MM-DD format"],
+                ["place_of_birth", "Place of birth (for persons)", "No", "Any text"],
+                ["nationality", "Nationality/citizenship", "No", "Country codes (US, FR, etc.)"],
+                ["country", "Current country", "No", "Country codes (US, FR, etc.)"],
+                ["reference_id", "Your internal reference", "No", "Any text"]
+            ]
+            
+            instructions_df = pd.DataFrame(instructions[1:], columns=instructions[0])
+            instructions_df.to_excel(writer, sheet_name='Instructions', index=False)
+        
+        output.seek(0)
+        
+        filename = f"sanctions_screening_template_{template_type}.xlsx"
+        
+        return StreamingResponse(
+            io.BytesIO(output.getvalue()),
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition": f"attachment; filename={filename}"}
+        )
+        
+    except Exception as e:
+        logger.error(f"Error generating template: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to generate template: {str(e)}")
+
+@router.get("/batch/results/{job_id}/export")
+async def export_batch_results(
+    job_id: str,
+    format: str = "excel",  # excel, csv, json
+    db: Session = Depends(get_db),
+    current_user: User = Depends(require_analyst_or_above)
+) -> StreamingResponse:
+    """Export batch processing results"""
+    
+    try:
+        # Get batch results from search history
+        search_history = db.query(SearchHistory).filter(
+            SearchHistory.user_id == current_user.id,
+            SearchHistory.data_source.like(f"%batch_{job_id}%")
+        ).first()
+        
+        if not search_history:
+            raise HTTPException(status_code=404, detail=f"Batch job {job_id} not found")
+        
+        batch_data = search_history.results_data
+        if not batch_data:
+            raise HTTPException(status_code=404, detail=f"No results found for batch job {job_id}")
+        
+        # Reconstruct batch result (simplified version for export)
+        from app.services.batch_processing import BatchJobResult
+        batch_result = BatchJobResult(
+            job_id=job_id,
+            total_records=len(batch_data),
+            processed_records=len(batch_data),
+            successful_records=len([r for r in batch_data if r.get("status") == "success"]),
+            failed_records=len([r for r in batch_data if r.get("status") != "success"]),
+            results=[r for r in batch_data if r.get("status") == "success"],
+            errors=[r for r in batch_data if r.get("status") != "success"],
+            processing_time_ms=search_history.execution_time_ms or 0,
+            status="completed"
+        )
+        
+        if format.lower() == "excel":
+            # Generate Excel export
+            excel_content = batch_processing_service.generate_results_excel(batch_result)
+            
+            return StreamingResponse(
+                io.BytesIO(excel_content),
+                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                headers={"Content-Disposition": f"attachment; filename=batch_results_{job_id}.xlsx"}
+            )
+            
+        elif format.lower() == "csv":
+            # Generate CSV export
+            import csv
+            output = io.StringIO()
+            writer = csv.writer(output)
+            
+            # Write headers
+            writer.writerow([
+                "Row Number", "Entity Name", "Entity Type", "Reference ID", 
+                "Status", "Matches Found", "Highest Risk Level", 
+                "Highest Match Score", "Highest Match Name", "Error"
+            ])
+            
+            # Write results
+            for result in batch_result.results + batch_result.errors:
+                highest_match = result.get("highest_risk_match", {})
+                writer.writerow([
+                    result.get("row_number", ""),
+                    result.get("entity_name", ""),
+                    result.get("entity_type", ""),
+                    result.get("reference_id", ""),
+                    result.get("status", ""),
+                    result.get("results_count", 0),
+                    highest_match.get("risk_level", ""),
+                    round(highest_match.get("score", 0) * 100, 2) if highest_match.get("score") else "",
+                    highest_match.get("caption", ""),
+                    result.get("error", "")
+                ])
+            
+            output.seek(0)
+            
+            return StreamingResponse(
+                io.BytesIO(output.getvalue().encode()),
+                media_type="text/csv",
+                headers={"Content-Disposition": f"attachment; filename=batch_results_{job_id}.csv"}
+            )
+            
+        elif format.lower() == "json":
+            # Return JSON export
+            import json
+            json_content = json.dumps({
+                "job_id": batch_result.job_id,
+                "summary": {
+                    "total_records": batch_result.total_records,
+                    "successful_records": batch_result.successful_records,
+                    "failed_records": batch_result.failed_records,
+                    "processing_time_ms": batch_result.processing_time_ms,
+                    "status": batch_result.status
+                },
+                "results": batch_result.results,
+                "errors": batch_result.errors
+            }, indent=2)
+            
+            return StreamingResponse(
+                io.BytesIO(json_content.encode()),
+                media_type="application/json",
+                headers={"Content-Disposition": f"attachment; filename=batch_results_{job_id}.json"}
+            )
+            
+        else:
+            raise HTTPException(status_code=400, detail="Invalid format. Supported formats: excel, csv, json")
+            
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error exporting batch results: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Failed to export results: {str(e)}")
+
+async def save_batch_to_history(db: Session, batch_result, filename: str, user_id: int):
+    """Save batch processing results to search history"""
+    try:
+        # Calculate risk metrics from batch results
+        risk_scores = []
+        high_risk_count = 0
+        medium_risk_count = 0
+        low_risk_count = 0
+        
+        all_results = batch_result.results + batch_result.errors
+        for result in all_results:
+            highest_match = result.get("highest_risk_match")
+            if highest_match:
+                score = highest_match.get("score", 0) * 100
+                risk_scores.append(score)
+                
+                risk_level = highest_match.get("risk_level", "LOW")
+                if risk_level == "HIGH":
+                    high_risk_count += 1
+                elif risk_level == "MEDIUM":
+                    medium_risk_count += 1
+                else:
+                    low_risk_count += 1
+        
+        avg_relevance = sum(risk_scores) / len(risk_scores) if risk_scores else 0
+        max_relevance = max(risk_scores) if risk_scores else 0
+        
+        # Determine overall risk level
+        if high_risk_count > 0:
+            overall_risk_level = "HIGH"
+        elif medium_risk_count > 0:
+            overall_risk_level = "MEDIUM"
+        else:
+            overall_risk_level = "LOW"
+        
+        # Create history entry
+        history_entry = SearchHistory(
+            query=f"BATCH: {filename} ({batch_result.total_records} entities)",
+            search_type="Batch",
+            results_count=batch_result.successful_records,
+            risk_level=overall_risk_level,
+            relevance_score=avg_relevance,
+            data_source=f"batch_{batch_result.job_id}",
+            execution_time_ms=batch_result.processing_time_ms,
+            results_data=all_results,  # Store full batch results
+            user_id=user_id
+        )
+        
+        db.add(history_entry)
+        db.commit()
+        db.refresh(history_entry)
+        
+        logger.info(f"Saved batch processing to history: {history_entry.id}")
+        
+    except Exception as e:
+        logger.error(f"Failed to save batch to history: {e}")
+        db.rollback()
