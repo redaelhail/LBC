@@ -233,7 +233,11 @@ const MainApp = () => {
     search_type: 'fuzzy',  // Default to fuzzy search for better results
     dataset: '',
     fuzzy: true,  // Enable OpenSanctions fuzzy matching by default
-    simple: true  // Enable simple syntax for better user experience
+    simple: true,  // Enable simple syntax for better user experience
+    // Date range filtering
+    date_from: '',
+    date_to: '',
+    changed_since: ''
   });
   
   // Refs to maintain focus
@@ -639,6 +643,10 @@ const MainApp = () => {
         ...(searchFilters.country && { countries: [searchFilters.country] }),
         // Enhanced search options
         ...(searchFilters.topics && { topics: searchFilters.topics }),
+        // Date range filtering
+        ...(searchFilters.changed_since && { changed_since: searchFilters.changed_since }),
+        ...(searchFilters.date_from && { date_from: searchFilters.date_from }),
+        ...(searchFilters.date_to && { date_to: searchFilters.date_to }),
         facets: ["countries", "topics", "datasets"],
         filter_op: "OR"
       };
@@ -1314,6 +1322,131 @@ const MainApp = () => {
 
             </div>
 
+            {/* Date Range Filtering */}
+            <div className="mt-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+              <h4 className="text-sm font-semibold text-blue-900 mb-3 flex items-center gap-2">
+                <Calendar className="h-4 w-4" />
+                Date Range Filtering
+              </h4>
+              <p className="text-xs text-blue-700 mb-4">
+                Filter entities by their last update or creation date in the sanctions/PEP databases
+              </p>
+              
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                {/* Quick Date Filter */}
+                <div>
+                  <label className="block text-sm font-medium text-blue-700 mb-2">Changed Since</label>
+                  <input
+                    type="date"
+                    value={searchFilters.changed_since}
+                    onChange={(e) => setSearchFilters(prev => ({ ...prev, changed_since: e.target.value, date_from: '', date_to: '' }))}
+                    className="w-full px-3 py-2 border border-blue-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                    title="Show entities updated since this date"
+                  />
+                  <p className="text-xs text-blue-600 mt-1">Entities updated since this date</p>
+                </div>
+
+                {/* Date Range From */}
+                <div>
+                  <label className="block text-sm font-medium text-blue-700 mb-2">From Date</label>
+                  <input
+                    type="date"
+                    value={searchFilters.date_from}
+                    onChange={(e) => {
+                      const newValue = e.target.value;
+                      setSearchFilters(prev => ({ 
+                        ...prev, 
+                        date_from: newValue, 
+                        changed_since: newValue ? '' : prev.changed_since,
+                        // Clear date_to if it becomes invalid
+                        date_to: (prev.date_to && newValue && prev.date_to < newValue) ? '' : prev.date_to
+                      }));
+                    }}
+                    className="w-full px-3 py-2 border border-blue-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                    max={new Date().toISOString().split('T')[0]} // Cannot be in the future
+                  />
+                </div>
+
+                {/* Date Range To */}
+                <div>
+                  <label className="block text-sm font-medium text-blue-700 mb-2">To Date</label>
+                  <input
+                    type="date"
+                    value={searchFilters.date_to}
+                    onChange={(e) => {
+                      const newDate = e.target.value;
+                      if (searchFilters.date_from && newDate < searchFilters.date_from) {
+                        // Show validation message or reset
+                        return;
+                      }
+                      setSearchFilters(prev => ({ ...prev, date_to: newDate }));
+                    }}
+                    className="w-full px-3 py-2 border border-blue-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
+                    min={searchFilters.date_from}
+                    max={new Date().toISOString().split('T')[0]} // Cannot be in the future
+                  />
+                  {searchFilters.date_from && searchFilters.date_to && searchFilters.date_to < searchFilters.date_from && (
+                    <p className="text-xs text-red-600 mt-1">End date must be after start date</p>
+                  )}
+                </div>
+              </div>
+
+              {/* Quick Date Presets */}
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  onClick={() => {
+                    const lastMonth = new Date();
+                    lastMonth.setMonth(lastMonth.getMonth() - 1);
+                    setSearchFilters(prev => ({ 
+                      ...prev, 
+                      changed_since: lastMonth.toISOString().split('T')[0],
+                      date_from: '', 
+                      date_to: '' 
+                    }));
+                  }}
+                  className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs hover:bg-blue-200 transition-colors"
+                >
+                  Last Month
+                </button>
+                <button
+                  onClick={() => {
+                    const lastWeek = new Date();
+                    lastWeek.setDate(lastWeek.getDate() - 7);
+                    setSearchFilters(prev => ({ 
+                      ...prev, 
+                      changed_since: lastWeek.toISOString().split('T')[0],
+                      date_from: '', 
+                      date_to: '' 
+                    }));
+                  }}
+                  className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs hover:bg-blue-200 transition-colors"
+                >
+                  Last Week
+                </button>
+                <button
+                  onClick={() => {
+                    const thisYear = new Date();
+                    thisYear.setMonth(0, 1); // January 1st of current year
+                    setSearchFilters(prev => ({ 
+                      ...prev, 
+                      changed_since: thisYear.toISOString().split('T')[0],
+                      date_from: '', 
+                      date_to: '' 
+                    }));
+                  }}
+                  className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs hover:bg-blue-200 transition-colors"
+                >
+                  This Year
+                </button>
+                <button
+                  onClick={() => setSearchFilters(prev => ({ ...prev, changed_since: '', date_from: '', date_to: '' }))}
+                  className="px-2 py-1 bg-gray-100 text-gray-600 rounded text-xs hover:bg-gray-200 transition-colors"
+                >
+                  Clear Dates
+                </button>
+              </div>
+            </div>
+
             {/* Search Options */}
             <div className="mt-6 flex flex-wrap gap-4">
               <label className="flex items-center">
@@ -1339,7 +1472,11 @@ const MainApp = () => {
                   entity_type: 'Person',
                   search_type: 'exact',
                   dataset: '',
-                  fuzzy: false
+                  fuzzy: false,
+                  simple: true,
+                  date_from: '',
+                  date_to: '',
+                  changed_since: ''
                 })}
                 className="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 transition-colors"
               >

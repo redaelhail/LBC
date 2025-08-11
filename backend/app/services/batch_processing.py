@@ -179,7 +179,8 @@ class BatchProcessingService:
         self, 
         entities: List[Dict[str, Any]], 
         dataset: str = "default",
-        user_id: int = 1
+        user_id: int = 1,
+        date_filters: Optional[Dict[str, str]] = None
     ) -> BatchJobResult:
         """
         Process batch screening for multiple entities
@@ -208,7 +209,7 @@ class BatchProcessingService:
             
             for i in range(0, len(entities), batch_size):
                 batch_entities = entities[i:i + batch_size]
-                batch_results = await self._process_entity_batch(batch_entities, dataset, job_id)
+                batch_results = await self._process_entity_batch(batch_entities, dataset, job_id, date_filters)
                 
                 for entity_result in batch_results:
                     processed += 1
@@ -255,7 +256,8 @@ class BatchProcessingService:
         self, 
         entities: List[Dict[str, Any]], 
         dataset: str,
-        job_id: str
+        job_id: str,
+        date_filters: Optional[Dict[str, str]] = None
     ) -> List[Dict[str, Any]]:
         """
         Process a single batch of entities
@@ -275,7 +277,7 @@ class BatchProcessingService:
             # Create tasks for parallel processing
             tasks = []
             for entity in entities:
-                task = self._screen_single_entity(client, entity, dataset, opensanctions_url, job_id)
+                task = self._screen_single_entity(client, entity, dataset, opensanctions_url, job_id, date_filters)
                 tasks.append(task)
             
             # Process all entities in parallel
@@ -305,7 +307,8 @@ class BatchProcessingService:
         entity: Dict[str, Any], 
         dataset: str,
         opensanctions_url: str,
-        job_id: str
+        job_id: str,
+        date_filters: Optional[Dict[str, str]] = None
     ) -> Dict[str, Any]:
         """
         Screen a single entity against OpenSanctions
@@ -341,6 +344,13 @@ class BatchProcessingService:
                     params["schema"] = "Company"
                 elif entity['type'] == 'Organization':
                     params["schema"] = "Organization"
+                    
+            # Add date range filtering if provided
+            if date_filters:
+                if date_filters.get('changed_since'):
+                    params["changed_since"] = date_filters['changed_since']
+                elif date_filters.get('date_from'):
+                    params["changed_since"] = date_filters['date_from']
             
             # Make request to OpenSanctions
             response = await client.get(

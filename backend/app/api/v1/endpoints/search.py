@@ -47,6 +47,10 @@ class SearchRequest(BaseModel):
     filter_op: str = "OR"  # OR or AND for combining filters
     # OpenSanctions specific parameters
     filter: Optional[str] = None  # Field-specific filters using "field:value" syntax
+    # Date range filtering parameters
+    changed_since: Optional[str] = None  # ISO date string for filtering entities by last update
+    date_from: Optional[str] = None      # Start date for date range filtering
+    date_to: Optional[str] = None        # End date for date range filtering
     # Morocco-specific filters
     risk_level: Optional[List[str]] = None
     political_party: Optional[str] = None
@@ -137,7 +141,16 @@ async def search_entities(
         if request.filter:
             params["filter"] = request.filter
             
-        logger.info(f"Searching OpenSanctions API: {opensanctions_url}/search/{request.dataset} with fuzzy={request.fuzzy}, simple={request.simple}")
+        # Add date range filtering parameters
+        if request.changed_since:
+            params["changed_since"] = request.changed_since
+            
+        # Handle custom date range filtering (convert to changed_since if needed)
+        if request.date_from and not request.changed_since:
+            # Use date_from as changed_since for OpenSanctions API
+            params["changed_since"] = request.date_from
+            
+        logger.info(f"Searching OpenSanctions API: {opensanctions_url}/search/{request.dataset} with fuzzy={request.fuzzy}, simple={request.simple}, date_filters={bool(request.changed_since or request.date_from)}")
         
         async with httpx.AsyncClient(timeout=30.0) as client:
             # Try the main search first
@@ -2151,6 +2164,9 @@ async def process_batch_screening(
     file: UploadFile = File(...),
     dataset: str = "default",
     template_type: str = "screening",
+    changed_since: Optional[str] = None,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
     db: Session = Depends(get_db),
     current_user: User = Depends(require_analyst_or_above)
 ) -> Dict[str, Any]:
@@ -2181,9 +2197,20 @@ async def process_batch_screening(
         
         logger.info(f"Starting batch processing for {len(entities)} entities from {file.filename}")
         
+        # Prepare date filters if provided
+        date_filters = None
+        if changed_since or date_from or date_to:
+            date_filters = {}
+            if changed_since:
+                date_filters['changed_since'] = changed_since
+            if date_from:
+                date_filters['date_from'] = date_from
+            if date_to:
+                date_filters['date_to'] = date_to
+        
         # Process batch screening
         batch_result = await batch_processing_service.process_batch_screening(
-            entities, dataset, current_user.id
+            entities, dataset, current_user.id, date_filters
         )
         
         # Save batch processing to search history

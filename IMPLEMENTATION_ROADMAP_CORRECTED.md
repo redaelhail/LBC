@@ -96,16 +96,22 @@ A centralized filtering platform for insurance intermediaries to screen business
   - [x] Multi-strategy search with query variations
   - [x] Enhanced search parameters (filter, facets)
   - [x] Improved frontend search interface
-  - [ ] Date range filtering 🚀 **NEXT PRIORITY**
-  - [ ] Nationality filtering (available via countries parameter)
+  - [x] Date range filtering ✅ **COMPLETED**
+  - [ ] Nationality filtering (available via countries parameter) 🚀 **NEXT PRIORITY**
   - [ ] List type filtering (available via topics parameter)
   - [ ] Configurable match thresholds (current: fuzzy matching enabled)
 
 ### 1.6 **NEXT PRIORITIES** 🚀
-- [ ] **Date Range Filtering** 🚀 **PRIORITY 1**
-  - [ ] Add date range selection to search interface
-  - [ ] Filter entities by creation/modification dates
-  - [ ] Enhanced temporal search capabilities
+- [x] **Date Range Filtering** ✅ **COMPLETED**
+  - [x] Add date range selection to search interface with intuitive UI
+  - [x] Filter entities by creation/modification dates using OpenSanctions changed_since parameter
+  - [x] Enhanced temporal search capabilities with multiple options:
+    * "Changed Since" - entities updated since a specific date
+    * "From/To Date Range" - entities within a specific date range
+    * Quick preset buttons (Last Week, Last Month, This Year)
+    * Date validation and error handling
+  - [x] Integration with both manual search and batch processing
+  - [x] Backend API support for date filtering parameters
 
 - [x] **Frontend Batch Upload Interface** ✅ **COMPLETED**
   - [x] Upload component for Excel files with drag-and-drop support

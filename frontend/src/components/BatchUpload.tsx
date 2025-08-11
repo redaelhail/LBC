@@ -45,6 +45,11 @@ const BatchUpload: React.FC = () => {
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [templateType, setTemplateType] = useState('screening');
   const [dataset, setDataset] = useState('default');
+  const [dateFilters, setDateFilters] = useState({
+    changed_since: '',
+    date_from: '',
+    date_to: ''
+  });
   const [validationResult, setValidationResult] = useState<ValidationResult | null>(null);
   const [isValidating, setIsValidating] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
@@ -134,7 +139,23 @@ const BatchUpload: React.FC = () => {
       const formData = new FormData();
       formData.append('file', selectedFile);
 
-      const response = await fetch(`/api/v1/search/batch/process?dataset=${dataset}&template_type=${templateType}`, {
+      // Build query parameters with date filters
+      const queryParams = new URLSearchParams({
+        dataset,
+        template_type: templateType
+      });
+      
+      if (dateFilters.changed_since) {
+        queryParams.append('changed_since', dateFilters.changed_since);
+      }
+      if (dateFilters.date_from) {
+        queryParams.append('date_from', dateFilters.date_from);
+      }
+      if (dateFilters.date_to) {
+        queryParams.append('date_to', dateFilters.date_to);
+      }
+
+      const response = await fetch(`/api/v1/search/batch/process?${queryParams.toString()}`, {
         method: 'POST',
         headers: {
           'Authorization': `Bearer ${localStorage.getItem('access_token')}`
@@ -327,21 +348,106 @@ const BatchUpload: React.FC = () => {
           className="hidden"
         />
 
-        {/* Dataset Selection */}
+        {/* Dataset Selection and Date Filters */}
         {selectedFile && (
-          <div className="mt-4 p-4 bg-gray-50 rounded-lg">
-            <label className="block text-sm font-medium text-gray-700 mb-2">
-              Dataset to Search
-            </label>
-            <select
-              value={dataset}
-              onChange={(e) => setDataset(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="default">All Datasets (Sanctions + PEP)</option>
-              <option value="sanctions">Sanctions Lists Only</option>
-              <option value="pep">PEP Lists Only</option>
-            </select>
+          <div className="mt-4 space-y-4">
+            {/* Dataset Selection */}
+            <div className="p-4 bg-gray-50 rounded-lg">
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Dataset to Search
+              </label>
+              <select
+                value={dataset}
+                onChange={(e) => setDataset(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="default">All Datasets (Sanctions + PEP)</option>
+                <option value="sanctions">Sanctions Lists Only</option>
+                <option value="pep">PEP Lists Only</option>
+              </select>
+            </div>
+
+            {/* Date Range Filtering */}
+            <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
+              <h4 className="text-sm font-semibold text-blue-900 mb-3 flex items-center gap-2">
+                <Clock className="h-4 w-4" />
+                Date Range Filtering (Optional)
+              </h4>
+              <p className="text-xs text-blue-700 mb-4">
+                Filter entities by their last update date in the sanctions/PEP databases
+              </p>
+              
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                <div>
+                  <label className="block text-sm font-medium text-blue-700 mb-2">Changed Since</label>
+                  <input
+                    type="date"
+                    value={dateFilters.changed_since}
+                    onChange={(e) => setDateFilters(prev => ({ 
+                      ...prev, 
+                      changed_since: e.target.value,
+                      date_from: e.target.value ? '' : prev.date_from,
+                      date_to: e.target.value ? '' : prev.date_to
+                    }))}
+                    className="w-full px-3 py-2 border border-blue-300 rounded-md focus:ring-2 focus:ring-blue-500 text-sm"
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-blue-700 mb-2">From Date</label>
+                  <input
+                    type="date"
+                    value={dateFilters.date_from}
+                    onChange={(e) => setDateFilters(prev => ({ 
+                      ...prev, 
+                      date_from: e.target.value,
+                      changed_since: e.target.value ? '' : prev.changed_since
+                    }))}
+                    className="w-full px-3 py-2 border border-blue-300 rounded-md focus:ring-2 focus:ring-blue-500 text-sm"
+                  />
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-blue-700 mb-2">To Date</label>
+                  <input
+                    type="date"
+                    value={dateFilters.date_to}
+                    onChange={(e) => setDateFilters(prev => ({ ...prev, date_to: e.target.value }))}
+                    min={dateFilters.date_from}
+                    className="w-full px-3 py-2 border border-blue-300 rounded-md focus:ring-2 focus:ring-blue-500 text-sm"
+                  />
+                </div>
+              </div>
+
+              <div className="mt-3 flex flex-wrap gap-2">
+                <button
+                  onClick={() => setDateFilters({ 
+                    changed_since: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+                    date_from: '', 
+                    date_to: '' 
+                  })}
+                  className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs hover:bg-blue-200"
+                >
+                  Last 30 Days
+                </button>
+                <button
+                  onClick={() => setDateFilters({ 
+                    changed_since: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().split('T')[0],
+                    date_from: '', 
+                    date_to: '' 
+                  })}
+                  className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs hover:bg-blue-200"
+                >
+                  Last 7 Days
+                </button>
+                <button
+                  onClick={() => setDateFilters({ changed_since: '', date_from: '', date_to: '' })}
+                  className="px-2 py-1 bg-gray-100 text-gray-600 rounded text-xs hover:bg-gray-200"
+                >
+                  Clear Dates
+                </button>
+              </div>
+            </div>
           </div>
         )}
       </div>
