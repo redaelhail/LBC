@@ -265,16 +265,21 @@ async def search_entities(
                 initial_data = response.json()
                 initial_results = initial_data.get("results", [])
                 
-                # If we have very few high-quality results, try additional queries
-                if len(initial_results) < 5:
+                # Only enhance results if user requested more than what was returned AND we got fewer than 5 results
+                should_enhance = len(initial_results) < min(5, request.limit) and request.limit > len(initial_results)
+                
+                if should_enhance:
+                    # Calculate how many additional results we can add while respecting the limit
+                    max_additional = request.limit - len(initial_results)
+                    
                     # Generate query variations for better matching
                     query_variations = fuzzy_matching_service.extract_name_variations(request.query)
                     additional_results = []
                     
                     for variation in query_variations[:3]:  # Try up to 3 variations
-                        if variation != request.query and len(variation.strip()) > 2:
+                        if variation != request.query and len(variation.strip()) > 2 and len(additional_results) < max_additional:
                             logger.info(f"Trying search variation: {variation}")
-                            var_params = {**params, "q": variation}
+                            var_params = {**params, "q": variation, "limit": max_additional}
                             var_response = await client.get(
                                 f"{opensanctions_url}/search/{request.dataset}",
                                 params=var_params
@@ -285,6 +290,8 @@ async def search_entities(
                                 var_results = var_data.get("results", [])
                                 # Add results that aren't already in initial_results
                                 for result in var_results:
+                                    if len(additional_results) >= max_additional:
+                                        break
                                     if not any(r.get("id") == result.get("id") for r in initial_results):
                                         additional_results.append({
                                             **result,
@@ -292,12 +299,15 @@ async def search_entities(
                                             "is_variation_result": True
                                         })
                     
-                    # Combine results, keeping original first
+                    # Combine results, respecting the user's limit
                     if additional_results:
-                        initial_results.extend(additional_results[:10])  # Add up to 10 additional
+                        additional_count = min(len(additional_results), max_additional)
+                        initial_results.extend(additional_results[:additional_count])
                         initial_data["results"] = initial_results
                         initial_data["total"]["value"] = len(initial_results)
-                        logger.info(f"Enhanced search found {len(additional_results)} additional results from variations")
+                        logger.info(f"Enhanced search found {additional_count} additional results (respecting limit={request.limit})")
+                else:
+                    logger.info(f"Skipping enhancement: {len(initial_results)} results already meet user's limit of {request.limit}")
                 
                 # Continue with the enhanced results
                 response._content = json.dumps(initial_data).encode()
