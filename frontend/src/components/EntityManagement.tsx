@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Building2, Plus, Users, Shield, BarChart3, Eye, X } from 'lucide-react';
+import { Building2, Plus, Users, Shield, BarChart3, Eye, X, Trash2 } from 'lucide-react';
 import EntityProfile from './EntityProfile';
 import RiskMatrixVisualization from './RiskMatrixVisualization';
 
@@ -280,7 +280,11 @@ const CreateEntityForm: React.FC<{
   );
 };
 
-const EntityManagement: React.FC = () => {
+interface EntityManagementProps {
+  isAdmin?: boolean;
+}
+
+const EntityManagement: React.FC<EntityManagementProps> = ({ isAdmin = false }) => {
   const [entities, setEntities] = useState<Entity[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedEntity, setSelectedEntity] = useState<number | null>(null);
@@ -363,6 +367,33 @@ const EntityManagement: React.FC = () => {
       setError(err instanceof Error ? err.message : 'Failed to create entity');
     } finally {
       setCreateLoading(false);
+    }
+  };
+
+  const deleteEntity = async (entityId: number, entityName: string) => {
+    if (!confirm(`Are you sure you want to delete "${entityName}"? This action cannot be undone.`)) {
+      return;
+    }
+
+    try {
+      const token = localStorage.getItem('access_token');
+      const response = await fetch(`/api/v1/entities/${entityId}`, {
+        method: 'DELETE',
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Failed to delete entity');
+      }
+
+      // Remove entity from local state
+      setEntities(prev => prev.filter(entity => entity.id !== entityId));
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to delete entity');
     }
   };
 
@@ -592,23 +623,34 @@ const EntityManagement: React.FC = () => {
                       </span>
                     </div>
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium space-x-2">
-                    <button
-                      onClick={() => handleEntitySelect(entity.id, 'profile')}
-                      className="text-blue-600 hover:text-blue-900 flex items-center text-xs"
-                    >
-                      <Eye className="h-3 w-3 mr-1" />
-                      Profile
-                    </button>
-                    {entity.current_risk_level && (
+                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
+                    <div className="flex items-center space-x-2">
                       <button
-                        onClick={() => handleEntitySelect(entity.id, 'matrix')}
-                        className="text-green-600 hover:text-green-900 flex items-center text-xs"
+                        onClick={() => handleEntitySelect(entity.id, 'profile')}
+                        className="text-blue-600 hover:text-blue-900 flex items-center text-xs"
                       >
-                        <BarChart3 className="h-3 w-3 mr-1" />
-                        Risk Matrix
+                        <Eye className="h-3 w-3 mr-1" />
+                        Profile
                       </button>
-                    )}
+                      {entity.current_risk_level && (
+                        <button
+                          onClick={() => handleEntitySelect(entity.id, 'matrix')}
+                          className="text-green-600 hover:text-green-900 flex items-center text-xs"
+                        >
+                          <BarChart3 className="h-3 w-3 mr-1" />
+                          Risk Matrix
+                        </button>
+                      )}
+                      {isAdmin && (
+                        <button
+                          onClick={() => deleteEntity(entity.id, entity.denomination)}
+                          className="text-red-600 hover:text-red-800 hover:bg-red-50 p-1 rounded transition-colors"
+                          title="Delete entity"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </button>
+                      )}
+                    </div>
                   </td>
                 </tr>
               ))}

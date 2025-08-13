@@ -12,7 +12,7 @@ from app.models import (
     EntityLBCContact, RiskScore, RiskLevel, User, AuditLog
 )
 from app.core.auth import get_current_user
-from app.core.permissions import require_analyst_or_above, require_compliance_officer_or_above
+from app.core.permissions import require_analyst_or_above, require_compliance_officer_or_above, require_admin
 from app.services.elasticsearch_service import elasticsearch_service
 
 logger = logging.getLogger(__name__)
@@ -406,7 +406,7 @@ async def delete_entity(
     entity_id: int,
     http_request: Request,
     db: Session = Depends(get_db),
-    current_user: User = Depends(require_compliance_officer_or_above)
+    current_user: User = Depends(require_admin)
 ) -> Dict[str, Any]:
     """
     Delete a supervised entity (soft delete by changing status)

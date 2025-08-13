@@ -47,26 +47,6 @@ const LoginForm = () => {
     }
   };
 
-  const testAPI = async () => {
-    try {
-      setDebugInfo('Testing API connection...');
-      
-      // Test basic connectivity
-      const healthResponse = await fetch('/api/v1/health');
-      const healthData = await healthResponse.json();
-      console.log('Health check:', healthData);
-      
-      // Test debug admin endpoint
-      const debugResponse = await fetch('/api/v1/auth/debug-admin');
-      const debugData = await debugResponse.json();
-      console.log('Debug admin:', debugData);
-      
-      setDebugInfo(`API Status: ${healthResponse.status} | Admin Debug: ${debugData.status}`);
-    } catch (err: any) {
-      setDebugInfo(`API Test Failed: ${err.message}`);
-      console.error('API test error:', err);
-    }
-  };
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-gray-50">
@@ -117,15 +97,6 @@ const LoginForm = () => {
             {loading ? 'Signing in...' : 'Sign In'}
           </button>
 
-          <div className="flex space-x-2">
-            <button
-              type="button"
-              onClick={testAPI}
-              className="flex-1 flex justify-center py-2 px-4 border border-gray-300 rounded-md shadow-sm text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
-            >
-              Test API
-            </button>
-          </div>
 
           {debugInfo && (
             <div className="bg-blue-100 border border-blue-400 text-blue-700 px-4 py-3 rounded text-sm">
@@ -266,6 +237,7 @@ const MainApp = () => {
   const [blacklistedEntities, setBlacklistedEntities] = useState([]);
   const [isLoadingBlacklisted, setIsLoadingBlacklisted] = useState(false);
   const [blacklistedEntityIds, setBlacklistedEntityIds] = useState(new Set());
+  const [selectedBlacklistedEntities, setSelectedBlacklistedEntities] = useState(new Set()); // Track selected entities for export
   
   // Manual Review Workflow
   const [reviewQueue, setReviewQueue] = useState([]); // Entities flagged for manual review
@@ -298,7 +270,7 @@ const MainApp = () => {
     date_to: '',
     changed_since: '',
     // Results display options
-    limit: 20,  // Number of results to display
+    limit: 10,  // Number of results to display
     // Configurable match thresholds
     min_score_threshold: 75.0,     // Minimum confidence score for matches
     exact_match_threshold: 95.0,   // Threshold for exact match classification
@@ -453,7 +425,8 @@ const MainApp = () => {
       reason: reason,
       flaggedAt: new Date().toISOString(),
       status: 'pending', // pending, approved, rejected, needs_more_info
-      confidence: getMatchConfidence(entity)
+      confidence: getMatchConfidence(entity),
+      searchId: currentSearchId // Include search context for blacklisting
     };
     
     setReviewQueue(prev => {
@@ -488,6 +461,65 @@ const MainApp = () => {
 
   const removeFromReviewQueue = (entityId) => {
     setReviewQueue(prev => prev.filter(item => item.id !== entityId));
+  };
+
+  const addToWhitelistFromReview = (reviewItem) => {
+    const reason = prompt('Reason for whitelisting (optional):', 'Confirmed false positive from review queue');
+    if (reason !== null) { // User didn't cancel
+      addToWhitelist(reviewItem.entity, reason || 'Confirmed false positive from review queue');
+      // Remove from review queue since it's now whitelisted
+      removeFromReviewQueue(reviewItem.id);
+      alert('✅ Entity added to whitelist and removed from review queue');
+    }
+  };
+
+  const addToBlacklistFromReview = async (reviewItem) => {
+    // For blacklist, we need a search context. If the review item came from a search, use that
+    const searchId = reviewItem.searchId || currentSearchId;
+    
+    if (!searchId) {
+      alert('⚠️ Cannot blacklist: No search context available. Please perform a search first.');
+      return;
+    }
+
+    try {
+      const entityId = reviewItem.entity.id || reviewItem.id;
+      const requestData = {
+        search_history_id: searchId,
+        entity_id: entityId,
+        entity_name: reviewItem.entity.caption || reviewItem.entity.name || 'Unknown Entity',
+        entity_data: reviewItem.entity,
+        relevance_score: 0,
+        risk_level: reviewItem.entity.risk_level || 'HIGH', // Blacklisted entities are high risk
+        user_id: 1,
+        notes: `Added to blacklist from review queue - ${reviewItem.reason}`
+      };
+
+      const response = await fetch(`${API_BASE_URL}/api/v1/search/entities/star`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${localStorage.getItem('access_token')}`
+        },
+        body: JSON.stringify(requestData)
+      });
+      
+      if (response.ok) {
+        // Add to blacklisted entity IDs
+        const entityId = reviewItem.entity.id || reviewItem.id;
+        setBlacklistedEntityIds(prev => new Set([...prev, entityId]));
+        // Remove from review queue since it's now blacklisted
+        removeFromReviewQueue(reviewItem.id);
+        alert('✅ Entity added to blacklist and removed from review queue');
+      } else {
+        const errorText = await response.text();
+        console.error('❌ Failed to blacklist entity:', response.status, errorText);
+        alert(`Failed to add to blacklist: ${response.status} ${errorText}`);
+      }
+    } catch (error) {
+      console.error('❌ Error blacklisting entity:', error);
+      alert(`Error adding to blacklist: ${error.message}`);
+    }
   };
 
   // Auto-flag borderline matches based on confidence thresholds
@@ -678,10 +710,289 @@ const MainApp = () => {
         link.click();
         document.body.removeChild(link);
         URL.revokeObjectURL(url);
+      } else {
+        // Fallback to client-side HTML-to-PDF
+        console.warn('Server PDF generation failed, using client-side fallback');
+        exportAllEntitiesClientSidePdf();
       }
     } catch (error) {
       console.error('Failed to export PDF report:', error);
+      // Fallback to client-side HTML-to-PDF
+      exportAllEntitiesClientSidePdf();
     }
+  };
+
+  const exportAllEntitiesClientSidePdf = () => {
+    // Use all entities for the export
+    const htmlContent = generatePdfHtmlContent(blacklistedEntities);
+    
+    // Open in new window for printing to PDF
+    const printWindow = window.open('', '_blank');
+    printWindow.document.write(htmlContent);
+    printWindow.document.close();
+    
+    // Auto-trigger print dialog after a short delay
+    setTimeout(() => {
+      printWindow.print();
+    }, 500);
+  };
+
+  // Entity selection functions
+  const toggleEntitySelection = (entityId) => {
+    setSelectedBlacklistedEntities(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(entityId)) {
+        newSet.delete(entityId);
+      } else {
+        newSet.add(entityId);
+      }
+      return newSet;
+    });
+  };
+
+  const selectAllBlacklistedEntities = () => {
+    setSelectedBlacklistedEntities(new Set(blacklistedEntities.map(entity => entity.id)));
+  };
+
+  const clearEntitySelection = () => {
+    setSelectedBlacklistedEntities(new Set());
+  };
+
+  // Export selected entities functions
+  const exportSelectedEntitiesCsv = async () => {
+    if (selectedBlacklistedEntities.size === 0) {
+      alert('Please select at least one entity to export.');
+      return;
+    }
+
+    try {
+      const selectedIds = Array.from(selectedBlacklistedEntities);
+      const response = await fetch(`${API_BASE_URL}/api/v1/search/reports/starred-entities/csv`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('access_token')}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ entity_ids: selectedIds })
+      });
+      
+      if (response.ok) {
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `selected-blacklisted-entities-${selectedIds.length}-${new Date().toISOString().split('T')[0]}.csv`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      } else {
+        // Fallback: export as CSV using client-side generation
+        exportSelectedEntitiesClientSide('csv');
+      }
+    } catch (error) {
+      console.error('Failed to export selected CSV report:', error);
+      // Fallback: export as CSV using client-side generation
+      exportSelectedEntitiesClientSide('csv');
+    }
+  };
+
+  const exportSelectedEntitiesPdf = async () => {
+    if (selectedBlacklistedEntities.size === 0) {
+      alert('Please select at least one entity to export.');
+      return;
+    }
+
+    try {
+      const selectedIds = Array.from(selectedBlacklistedEntities);
+      const response = await fetch(`${API_BASE_URL}/api/v1/search/reports/starred-entities/pdf`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${localStorage.getItem('access_token')}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({ entity_ids: selectedIds })
+      });
+      
+      if (response.ok) {
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `selected-blacklisted-entities-${selectedIds.length}-${new Date().toISOString().split('T')[0]}.pdf`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      } else {
+        // Fallback: export as PDF using client-side generation
+        exportSelectedEntitiesClientSide('pdf');
+      }
+    } catch (error) {
+      console.error('Failed to export selected PDF report:', error);
+      // Fallback: export as PDF using client-side generation
+      exportSelectedEntitiesClientSide('pdf');
+    }
+  };
+
+  const exportSelectedEntitiesClientSide = (format) => {
+    const selectedEntities = blacklistedEntities.filter(entity => 
+      selectedBlacklistedEntities.has(entity.id)
+    );
+
+    if (format === 'csv') {
+      // Generate CSV
+      const headers = ['Entity Name', 'Type', 'Search Query', 'Blacklisted Date', 'Notes'];
+      const csvContent = [
+        headers.join(','),
+        ...selectedEntities.map(entity => [
+          `"${entity.entity_name || 'Unknown'}"`,
+          `"${entity.entity_data?.schema || 'Entity'}"`,
+          `"${entity.search_context?.query || 'N/A'}"`,
+          `"${new Date(entity.starred_at).toLocaleDateString()}"`,
+          `"${entity.notes || 'No notes'}"`
+        ].join(','))
+      ].join('\n');
+
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = `selected-blacklisted-entities-${selectedEntities.length}-${new Date().toISOString().split('T')[0]}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+    } else if (format === 'pdf') {
+      // Create a formatted HTML document that can be printed to PDF
+      const htmlContent = generatePdfHtmlContent(selectedEntities);
+      
+      // Open in new window for printing to PDF
+      const printWindow = window.open('', '_blank');
+      printWindow.document.write(htmlContent);
+      printWindow.document.close();
+      
+      // Auto-trigger print dialog after a short delay
+      setTimeout(() => {
+        printWindow.print();
+      }, 500);
+    }
+  };
+
+  const generatePdfHtmlContent = (entities) => {
+    const currentDate = new Date().toLocaleDateString();
+    const currentTime = new Date().toLocaleTimeString();
+    
+    const entityRows = entities.map(entity => {
+      const entityData = entity.entity_data || {};
+      const properties = entityData.properties || {};
+      
+      return `
+        <div class="entity-card">
+          <h3 style="color: #dc2626; margin-bottom: 10px;">🛡️ ${entity.entity_name}</h3>
+          <div class="entity-details">
+            <p><strong>Type:</strong> ${entityData.schema || 'Entity'}</p>
+            <p><strong>Search Query:</strong> ${entity.search_context?.query || 'N/A'}</p>
+            <p><strong>Blacklisted Date:</strong> ${new Date(entity.starred_at).toLocaleDateString()}</p>
+            ${properties.birthDate ? `<p><strong>Birth Date:</strong> ${new Date(properties.birthDate[0]).toLocaleDateString()}</p>` : ''}
+            ${properties.birthPlace ? `<p><strong>Birth Place:</strong> ${properties.birthPlace[0]}</p>` : ''}
+            ${properties.nationality ? `<p><strong>Nationality:</strong> ${properties.nationality.join(', ')}</p>` : ''}
+            ${properties.topics ? `<p><strong>Topics:</strong> ${properties.topics.join(', ')}</p>` : ''}
+            ${entity.notes ? `<p><strong>Security Notes:</strong> ${entity.notes}</p>` : ''}
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    return `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Blacklisted Entities Report</title>
+        <style>
+          @media print {
+            .no-print { display: none !important; }
+          }
+          body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+          }
+          .header {
+            text-align: center;
+            border-bottom: 2px solid #dc2626;
+            margin-bottom: 30px;
+            padding-bottom: 20px;
+          }
+          .header h1 {
+            color: #dc2626;
+            margin-bottom: 10px;
+          }
+          .report-info {
+            background: #f9fafb;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+          }
+          .entity-card {
+            border: 2px solid #dc2626;
+            background: #fef2f2;
+            padding: 15px;
+            margin-bottom: 20px;
+            border-radius: 8px;
+            page-break-inside: avoid;
+          }
+          .entity-details p {
+            margin: 5px 0;
+          }
+          .print-instructions {
+            background: #dbeafe;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            border-left: 4px solid #3b82f6;
+          }
+          @page {
+            margin: 1in;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="header">
+          <h1>🛡️ Blacklisted Entities Report</h1>
+          <p>Comprehensive Security Report</p>
+        </div>
+        
+        <div class="print-instructions no-print">
+          <h3>📄 Print to PDF Instructions:</h3>
+          <ol>
+            <li>Press <strong>Ctrl+P</strong> (or Cmd+P on Mac)</li>
+            <li>Select <strong>"Save as PDF"</strong> as destination</li>
+            <li>Choose <strong>"More settings"</strong> and select <strong>"Paper size: A4"</strong></li>
+            <li>Click <strong>"Save"</strong> to download the PDF</li>
+          </ol>
+        </div>
+        
+        <div class="report-info">
+          <h3>Report Summary</h3>
+          <p><strong>Generated:</strong> ${currentDate} at ${currentTime}</p>
+          <p><strong>Total Entities:</strong> ${entities.length}</p>
+          <p><strong>Report Type:</strong> Selected Blacklisted Entities Export</p>
+        </div>
+        
+        <h2>Blacklisted Entities Details</h2>
+        ${entityRows}
+        
+        <div style="margin-top: 40px; text-align: center; color: #666; font-size: 12px;">
+          <p>This report contains sensitive security information. Handle according to your organization's data protection policies.</p>
+          <p>Generated by SanctionsGuard Pro - ${currentDate}</p>
+        </div>
+      </body>
+      </html>
+    `;
   };
 
   const showConfirmDialog = (title, message, onConfirm, confirmText = 'Confirm', variant = 'danger') => {
@@ -815,7 +1126,7 @@ const MainApp = () => {
       const requestBody = { 
         query: query,
         dataset: searchFilters.dataset || 'default',
-        limit: searchFilters.limit || 20,  // Use user-selected limit
+        limit: searchFilters.limit,  // Use user-selected limit
         // Client-side display flags (not sent to OpenSanctions API)
         fuzzy: true,  // For UI display only
         simple: true, // For UI display only
@@ -2712,7 +3023,7 @@ const MainApp = () => {
                   date_from: '',
                   date_to: '',
                   changed_since: '',
-                  limit: 20,
+                  limit: 10,
                   min_score_threshold: 75.0,
                   exact_match_threshold: 95.0,
                   phonetic_threshold: 80.0
@@ -3618,13 +3929,15 @@ const MainApp = () => {
                   >
                     <MessageSquare className="h-4 w-4" />
                   </button>
-                  <button 
-                    onClick={() => deleteSearchHistory(item.id)}
-                    className="p-2 text-red-600 hover:text-red-800 hover:bg-red-50 rounded-lg transition-colors" 
-                    title="Delete search"
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
+                  {isAdmin && (
+                    <button 
+                      onClick={() => deleteSearchHistory(item.id)}
+                      className="p-2 text-red-600 hover:text-red-800 hover:bg-red-50 rounded-lg transition-colors" 
+                      title="Delete search"
+                    >
+                      <Trash2 className="h-4 w-4" />
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
@@ -3701,31 +4014,48 @@ const MainApp = () => {
                 </>
               )}
             </button>
-            <div className="flex gap-2">
-              <button
-                onClick={generateBlacklistedReport}
-                className="px-3 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 flex items-center gap-2 text-sm"
-                title="Export as JSON"
-              >
-                <Download className="h-4 w-4" />
-                JSON
-              </button>
-              <button
-                onClick={exportBlacklistedEntitiesCsv}
-                className="px-3 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center gap-2 text-sm"
-                title="Export as CSV"
-              >
-                <Download className="h-4 w-4" />
-                CSV
-              </button>
-              <button
-                onClick={exportBlacklistedEntitiesPdf}
-                className="px-3 py-2 bg-orange-600 text-white rounded-lg hover:bg-orange-700 flex items-center gap-2 text-sm"
-                title="Export as PDF"
-              >
-                <Download className="h-4 w-4" />
-                PDF
-              </button>
+            <div className="flex gap-2 flex-wrap">
+              {/* All Entities Export */}
+              <div className="flex gap-1">
+                <button
+                  onClick={exportBlacklistedEntitiesCsv}
+                  className="px-3 py-2 bg-green-600 text-white rounded-l-lg hover:bg-green-700 flex items-center gap-2 text-sm"
+                  title="Export all entities as CSV"
+                >
+                  <Download className="h-4 w-4" />
+                  All CSV
+                </button>
+                <button
+                  onClick={exportBlacklistedEntitiesPdf}
+                  className="px-3 py-2 bg-orange-600 text-white rounded-r-lg hover:bg-orange-700 flex items-center gap-2 text-sm"
+                  title="Export all entities as PDF"
+                >
+                  <Download className="h-4 w-4" />
+                  All PDF
+                </button>
+              </div>
+              
+              {/* Selected Entities Export */}
+              <div className="flex gap-1">
+                <button
+                  onClick={exportSelectedEntitiesCsv}
+                  disabled={selectedBlacklistedEntities.size === 0}
+                  className="px-3 py-2 bg-blue-600 text-white rounded-l-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 text-sm"
+                  title={`Export ${selectedBlacklistedEntities.size} selected entities as CSV`}
+                >
+                  <Download className="h-4 w-4" />
+                  Selected CSV ({selectedBlacklistedEntities.size})
+                </button>
+                <button
+                  onClick={exportSelectedEntitiesPdf}
+                  disabled={selectedBlacklistedEntities.size === 0}
+                  className="px-3 py-2 bg-purple-600 text-white rounded-r-lg hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 text-sm"
+                  title={`Export ${selectedBlacklistedEntities.size} selected entities as PDF`}
+                >
+                  <Download className="h-4 w-4" />
+                  Selected PDF ({selectedBlacklistedEntities.size})
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -3733,9 +4063,31 @@ const MainApp = () => {
         {/* Blacklisted Entities Display */}
         {blacklistedEntities.length > 0 && (
           <div className="mb-6">
-            <h4 className="text-xl font-semibold mb-4">
-              Blacklisted Entities ({blacklistedEntities.length})
-            </h4>
+            <div className="flex items-center justify-between mb-4">
+              <h4 className="text-xl font-semibold">
+                Blacklisted Entities ({blacklistedEntities.length})
+              </h4>
+              
+              {/* Selection Controls */}
+              <div className="flex items-center gap-3">
+                <span className="text-sm text-gray-600">
+                  {selectedBlacklistedEntities.size} selected
+                </span>
+                <button
+                  onClick={selectAllBlacklistedEntities}
+                  className="px-3 py-1 bg-blue-100 text-blue-700 rounded hover:bg-blue-200 text-sm"
+                >
+                  Select All
+                </button>
+                <button
+                  onClick={clearEntitySelection}
+                  disabled={selectedBlacklistedEntities.size === 0}
+                  className="px-3 py-1 bg-gray-100 text-gray-700 rounded hover:bg-gray-200 disabled:opacity-50 disabled:cursor-not-allowed text-sm"
+                >
+                  Clear Selection
+                </button>
+              </div>
+            </div>
             
             <div className="space-y-4">
               {blacklistedEntities.map((entity) => {
@@ -3744,7 +4096,17 @@ const MainApp = () => {
                 
                 return (
                   <div key={entity.id} className="border-2 border-red-300 bg-red-50 rounded-lg p-5 hover:shadow-md transition-shadow">
-                    <div className="flex items-start justify-between">
+                    <div className="flex items-start gap-4">
+                      {/* Selection Checkbox */}
+                      <div className="flex items-center mt-1">
+                        <input
+                          type="checkbox"
+                          checked={selectedBlacklistedEntities.has(entity.id)}
+                          onChange={() => toggleEntitySelection(entity.id)}
+                          className="h-4 w-4 text-blue-600 bg-gray-100 border-gray-300 rounded focus:ring-blue-500 focus:ring-2"
+                        />
+                      </div>
+                      
                       <div className="flex-1">
                         <div className="flex items-center gap-3 mb-4">
                           {entityData.schema === 'Person' ? 
@@ -3988,7 +4350,7 @@ const MainApp = () => {
                               <MessageSquare className="h-4 w-4" />
                               Security Notes
                             </h5>
-                            <div className="flex gap-2">
+                            <div className="flex gap-2 flex-wrap">
                               {editingBlacklistedNote !== entity.id && (
                                 <button
                                   onClick={() => startEditingBlacklistedNote(entity.id)}
@@ -3998,6 +4360,28 @@ const MainApp = () => {
                                   {entity.notes ? 'Edit Notes' : 'Add Notes'}
                                 </button>
                               )}
+                              <button
+                                onClick={() => {
+                                  setSelectedBlacklistedEntities(new Set([entity.id]));
+                                  exportSelectedEntitiesCsv();
+                                }}
+                                className="px-3 py-1 bg-green-600 text-white text-xs rounded hover:bg-green-700 transition-colors flex items-center gap-1"
+                                title="Export this entity as CSV"
+                              >
+                                <Download className="h-3 w-3" />
+                                CSV
+                              </button>
+                              <button
+                                onClick={() => {
+                                  setSelectedBlacklistedEntities(new Set([entity.id]));
+                                  exportSelectedEntitiesPdf();
+                                }}
+                                className="px-3 py-1 bg-orange-600 text-white text-xs rounded hover:bg-orange-700 transition-colors flex items-center gap-1"
+                                title="Export this entity as PDF"
+                              >
+                                <Download className="h-3 w-3" />
+                                PDF
+                              </button>
                               <button
                                 onClick={() => setConfirmUnblacklist(entity)}
                                 className="px-3 py-1 bg-red-600 text-white text-xs rounded hover:bg-red-700 transition-colors flex items-center gap-1"
@@ -4969,47 +5353,73 @@ const MainApp = () => {
                 </div>
 
                 {/* Review Decision Buttons */}
-                {reviewItem.status === 'pending' && (
-                  <div className="flex gap-3 mt-4">
-                    <button
-                      onClick={() => {
-                        const notes = prompt('Add review notes (optional):');
-                        makeReviewDecision(reviewItem.id, 'approved', notes || '');
-                      }}
-                      className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center gap-2"
-                    >
-                      <CheckCircle className="h-4 w-4" />
-                      Approve Match
-                    </button>
-                    <button
-                      onClick={() => {
-                        const notes = prompt('Add rejection reason (optional):');
-                        makeReviewDecision(reviewItem.id, 'rejected', notes || '');
-                      }}
-                      className="px-4 py-2 bg-red-600 text-white rounded-lg hover:bg-red-700 flex items-center gap-2"
-                    >
-                      <X className="h-4 w-4" />
-                      Reject Match
-                    </button>
-                    <button
-                      onClick={() => {
-                        const notes = prompt('What additional information is needed?');
-                        makeReviewDecision(reviewItem.id, 'needs_more_info', notes || '');
-                      }}
-                      className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-2"
-                    >
-                      <AlertCircle className="h-4 w-4" />
-                      Needs More Info
-                    </button>
-                    <button
-                      onClick={() => removeFromReviewQueue(reviewItem.id)}
-                      className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 flex items-center gap-2"
-                    >
-                      <Trash2 className="h-4 w-4" />
-                      Remove
-                    </button>
-                  </div>
-                )}
+                <div className="flex gap-3 mt-4">
+                  <button
+                    onClick={() => {
+                      const notes = prompt('Add review notes (optional):');
+                      makeReviewDecision(reviewItem.id, 'approved', notes || '');
+                    }}
+                    className={`px-4 py-2 rounded-lg hover:bg-green-700 flex items-center gap-2 ${
+                      reviewItem.status === 'approved' 
+                        ? 'bg-green-700 text-white border-2 border-green-800' 
+                        : 'bg-green-600 text-white'
+                    }`}
+                  >
+                    <CheckCircle className="h-4 w-4" />
+                    {reviewItem.status === 'approved' ? 'Approved ✓' : 'Approve Match'}
+                  </button>
+                  <button
+                    onClick={() => {
+                      const notes = prompt('Add rejection reason (optional):');
+                      makeReviewDecision(reviewItem.id, 'rejected', notes || '');
+                    }}
+                    className={`px-4 py-2 rounded-lg hover:bg-red-700 flex items-center gap-2 ${
+                      reviewItem.status === 'rejected' 
+                        ? 'bg-red-700 text-white border-2 border-red-800' 
+                        : 'bg-red-600 text-white'
+                    }`}
+                  >
+                    <X className="h-4 w-4" />
+                    {reviewItem.status === 'rejected' ? 'Rejected ✓' : 'Reject Match'}
+                  </button>
+                  <button
+                    onClick={() => {
+                      const notes = prompt('What additional information is needed?');
+                      makeReviewDecision(reviewItem.id, 'needs_more_info', notes || '');
+                    }}
+                    className={`px-4 py-2 rounded-lg hover:bg-blue-700 flex items-center gap-2 ${
+                      reviewItem.status === 'needs_more_info' 
+                        ? 'bg-blue-700 text-white border-2 border-blue-800' 
+                        : 'bg-blue-600 text-white'
+                    }`}
+                  >
+                    <AlertCircle className="h-4 w-4" />
+                    {reviewItem.status === 'needs_more_info' ? 'Needs Info ✓' : 'Needs More Info'}
+                  </button>
+                  <button
+                    onClick={() => addToWhitelistFromReview(reviewItem)}
+                    className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 flex items-center gap-2"
+                    title="Add to whitelist - confirmed false positive"
+                  >
+                    <Shield className="h-4 w-4" />
+                    Whitelist
+                  </button>
+                  <button
+                    onClick={() => addToBlacklistFromReview(reviewItem)}
+                    className="px-4 py-2 bg-red-800 text-white rounded-lg hover:bg-red-900 flex items-center gap-2"
+                    title="Add to blacklist - confirmed threat"
+                  >
+                    <UserX className="h-4 w-4" />
+                    Blacklist
+                  </button>
+                  <button
+                    onClick={() => removeFromReviewQueue(reviewItem.id)}
+                    className="px-4 py-2 bg-gray-500 text-white rounded-lg hover:bg-gray-600 flex items-center gap-2"
+                  >
+                    <Trash2 className="h-4 w-4" />
+                    Remove
+                  </button>
+                </div>
 
                 {/* Show Review Notes */}
                 {reviewItem.reviewNotes && (
@@ -6221,7 +6631,7 @@ const MainApp = () => {
         {activeTab === 'dashboard' && <DashboardView />}
         {activeTab === 'search' && <SearchView />}
         {activeTab === 'batch' && <BatchUpload />}
-        {activeTab === 'entities' && <EntityManagement />}
+        {activeTab === 'entities' && <EntityManagement isAdmin={isAdmin} />}
         {activeTab === 'history' && <HistoryView />}
         {activeTab === 'review' && <ReviewView />}
         {activeTab === 'whitelist' && <WhitelistView />}
