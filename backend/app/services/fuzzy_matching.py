@@ -25,10 +25,10 @@ class MatchResult:
 class FuzzyMatchingService:
     """Enhanced fuzzy matching service for sanctions screening"""
     
-    def __init__(self):
-        self.min_score_threshold = 75.0  # Minimum confidence score
-        self.exact_match_threshold = 95.0
-        self.phonetic_threshold = 80.0
+    def __init__(self, min_score_threshold=75.0, exact_match_threshold=95.0, phonetic_threshold=80.0):
+        self.min_score_threshold = min_score_threshold  # Minimum confidence score
+        self.exact_match_threshold = exact_match_threshold
+        self.phonetic_threshold = phonetic_threshold
         
     def normalize_name(self, name: str) -> str:
         """

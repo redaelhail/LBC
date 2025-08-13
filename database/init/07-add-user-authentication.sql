@@ -30,12 +30,12 @@ CREATE INDEX IF NOT EXISTS idx_audit_logs_timestamp ON audit_logs(timestamp DESC
 CREATE INDEX IF NOT EXISTS idx_audit_logs_resource ON audit_logs(resource);
 
 -- Create a default admin user (password: admin123)
--- Hash for 'admin123' using bcrypt
+-- Hash for 'admin123' using bcrypt - proper hash format
 INSERT INTO users (username, email, hashed_password, full_name, role, is_superuser, is_active) 
 VALUES (
     'admin',
     'admin@sanctionsguard.com',
-    '$2b$12$QqL8ZK5z8ZQ8P5P5P5P5PeGl1bWl1bWl1bWl1bWl1bWl1bWl1bWlK', -- admin123
+    '$2b$12$EixZaYVK1fsbw1ZfbX3OXePaWxn96p36WQoeG6Lruj3vjPGga31lW', -- admin123
     'System Administrator',
     'admin',
     true,
