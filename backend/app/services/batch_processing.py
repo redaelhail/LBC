@@ -330,13 +330,10 @@ class BatchProcessingService:
         row_number = entity['row_number']
         
         try:
-            # Prepare search parameters
+            # Prepare search parameters (using only official OpenSanctions API parameters)
             params = {
                 "q": entity_name,
-                "limit": limit,
-                "fuzzy": True,
-                "simple": True,
-                "facets": ["countries", "topics", "datasets"]
+                "limit": limit
             }
             
             # Add optional filters if provided
@@ -355,11 +352,70 @@ class BatchProcessingService:
                 elif date_filters.get('date_from'):
                     params["changed_since"] = date_filters['date_from']
             
-            # Make request to OpenSanctions
-            response = await client.get(
-                f"{opensanctions_url}/search/{dataset}",
-                params=params
-            )
+            # Try matching endpoint first for better fuzzy matching, fallback to search
+            response = None
+            try:
+                # Build matching query payload
+                match_query = {"name": entity_name}
+                
+                # Add additional fields if available
+                if entity.get('country'):
+                    match_query["country"] = entity['country']
+                if entity.get('type') and entity['type'] != 'Person':
+                    if entity['type'] == 'Company':
+                        match_query["schema"] = "Company"
+                    elif entity['type'] == 'Organization':
+                        match_query["schema"] = "Organization"
+                
+                match_payload = {
+                    "queries": [match_query],
+                    "limit": limit,
+                    "threshold": 0.4,  # Lower threshold for more fuzzy results
+                }
+                
+                # Add date range filtering if provided
+                if date_filters:
+                    if date_filters.get('changed_since'):
+                        match_payload["changed_since"] = date_filters['changed_since']
+                    elif date_filters.get('date_from'):
+                        match_payload["changed_since"] = date_filters['date_from']
+                
+                match_response = await client.post(
+                    f"{opensanctions_url}/match/{dataset}",
+                    json=match_payload
+                )
+                
+                if match_response.status_code == 200:
+                    match_data = match_response.json()
+                    match_results = match_data.get("results", [])
+                    
+                    # Convert matching results to search format
+                    if match_results and len(match_results) > 0:
+                        query_matches = match_results[0].get("results", [])
+                        
+                        if len(query_matches) > 0:
+                            # Convert to search response format
+                            search_format_data = {
+                                "results": query_matches,
+                                "total": {"value": len(query_matches)}
+                            }
+                            response = type('Response', (), {
+                                'status_code': 200,
+                                'json': lambda: search_format_data
+                            })()
+                
+                # Fallback to search endpoint if matching fails
+                if not response or response.status_code != 200:
+                    response = await client.get(
+                        f"{opensanctions_url}/search/{dataset}",
+                        params=params
+                    )
+            except Exception as e:
+                logger.warning(f"Matching endpoint failed for {entity_name}, falling back to search: {e}")
+                response = await client.get(
+                    f"{opensanctions_url}/search/{dataset}",
+                    params=params
+                )
             
             if response.status_code == 200:
                 opensanctions_data = response.json()

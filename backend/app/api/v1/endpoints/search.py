@@ -20,8 +20,9 @@ from app.models.audit_log import AuditLog
 from app.core.auth import get_current_user
 from app.core.permissions import require_analyst_or_above, require_compliance_officer_or_above, can_search_entities
 from app.services.moroccan_entities import moroccan_entities_service
-from app.services.fuzzy_matching import fuzzy_matching_service
+from app.services.fuzzy_matching import fuzzy_matching_service, FuzzyMatchingService
 from app.services.batch_processing import batch_processing_service
+from app.services.audit_service import get_audit_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -31,32 +32,46 @@ class SearchRequest(BaseModel):
     dataset: str = "default"
     limit: int = 10
     offset: int = 0
-    schema: Optional[str] = None
+    
+    # Official OpenSanctions API parameters (from OpenAPI spec)
+    schema: Optional[str] = None  # Default: "Thing"
     countries: Optional[List[str]] = None
     topics: Optional[List[str]] = None
-    # Enhanced search criteria based on OpenSanctions API
     include_dataset: Optional[List[str]] = None
     exclude_dataset: Optional[List[str]] = None
     exclude_schema: Optional[List[str]] = None
-    changed_since: Optional[str] = None
-    datasets: Optional[List[str]] = None
-    sort: Optional[List[str]] = None
-    fuzzy: bool = True  # Enable OpenSanctions fuzzy matching by default
-    simple: bool = True  # Use simple syntax for better user experience
-    facets: Optional[List[str]] = ["countries", "topics", "datasets"]
-    filter_op: str = "OR"  # OR or AND for combining filters
-    # OpenSanctions specific parameters
-    filter: Optional[str] = None  # Field-specific filters using "field:value" syntax
-    # Date range filtering parameters
     changed_since: Optional[str] = None  # ISO date string for filtering entities by last update
+    datasets: Optional[List[str]] = None
+    filter: Optional[List[str]] = None  # Array of field-specific filters
+    
+    # Custom date range filtering (converted to changed_since internally)
     date_from: Optional[str] = None      # Start date for date range filtering
     date_to: Optional[str] = None        # End date for date range filtering
-    # Morocco-specific filters
+    
+    # Client-side settings (not sent to OpenSanctions API)
+    fuzzy: bool = True  # For frontend display only
+    simple: bool = True  # For frontend display only
+    
+    # Configurable match thresholds
+    min_score_threshold: Optional[float] = 75.0     # Minimum confidence score for matches
+    exact_match_threshold: Optional[float] = 95.0   # Threshold for exact match classification
+    phonetic_threshold: Optional[float] = 80.0      # Threshold for phonetic match classification
+    
+    # Morocco-specific filters (for moroccan_entities dataset)
     risk_level: Optional[List[str]] = None
     political_party: Optional[str] = None
     region: Optional[str] = None
     position_type: Optional[str] = None  # parliament, regional, municipal
     mandate_year: Optional[str] = None
+    
+    # Enhanced search criteria
+    place_of_birth: Optional[str] = None
+    passport_number: Optional[str] = None
+    id_number: Optional[str] = None
+    birth_date: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    role: Optional[str] = None
 
 class NoteRequest(BaseModel):
     search_history_id: int
@@ -103,61 +118,147 @@ async def search_entities(
         return generate_fallback_response(request, opensanctions_status)
     
     try:
-        # Prepare search parameters with enhanced criteria
+        # Build enhanced search query from individual fields
+        search_terms = [request.query] if request.query else []
+        
+        # Add specific field searches to enhance the query
+        if request.first_name:
+            search_terms.append(request.first_name)
+        if request.last_name:
+            search_terms.append(request.last_name)
+        if request.place_of_birth:
+            search_terms.append(request.place_of_birth)
+        if request.passport_number:
+            search_terms.append(request.passport_number)
+        if request.id_number:
+            search_terms.append(request.id_number)
+        if request.role:
+            search_terms.append(request.role)
+        
+        # Combine all search terms
+        enhanced_query = " ".join(search_terms).strip()
+        if not enhanced_query:
+            enhanced_query = request.query or ""
+        
+        # Prepare search parameters using ONLY official OpenSanctions API parameters
         params = {
-            "q": request.query,
-            "limit": request.limit,
-            "offset": request.offset,
-            "filter_op": request.filter_op,
-            "fuzzy": request.fuzzy,
-            "simple": request.simple
+            "q": enhanced_query,
+            "limit": request.limit
         }
         
-        # Add facets
-        if request.facets:
-            params["facets"] = request.facets
+        # Note: offset, filter_op, fuzzy, simple, facets are NOT supported by OpenSanctions API
         
-        # Basic filters
+        # Basic filters - ensure arrays are properly formatted
         if request.schema:
             params["schema"] = request.schema
         if request.countries:
-            params["countries"] = request.countries
+            # Ensure countries is sent as array
+            params["countries"] = request.countries if isinstance(request.countries, list) else [request.countries]
         if request.topics:
-            params["topics"] = request.topics
+            # Ensure topics is sent as array  
+            params["topics"] = request.topics if isinstance(request.topics, list) else [request.topics]
             
-        # Enhanced OpenSanctions filters
+        # Enhanced OpenSanctions filters (using official API parameters only)
         if request.include_dataset:
-            params["include_dataset"] = request.include_dataset
+            params["include_dataset"] = request.include_dataset if isinstance(request.include_dataset, list) else [request.include_dataset]
         if request.exclude_dataset:
-            params["exclude_dataset"] = request.exclude_dataset
+            params["exclude_dataset"] = request.exclude_dataset if isinstance(request.exclude_dataset, list) else [request.exclude_dataset]
         if request.exclude_schema:
-            params["exclude_schema"] = request.exclude_schema
-        if request.changed_since:
-            params["changed_since"] = request.changed_since
+            params["exclude_schema"] = request.exclude_schema if isinstance(request.exclude_schema, list) else [request.exclude_schema]
         if request.datasets:
-            params["datasets"] = request.datasets
-        if request.sort:
-            params["sort"] = request.sort
+            params["datasets"] = request.datasets if isinstance(request.datasets, list) else [request.datasets]
         if request.filter:
-            params["filter"] = request.filter
+            params["filter"] = request.filter if isinstance(request.filter, list) else [request.filter]
             
-        # Add date range filtering parameters
+        # Date filtering - use changed_since parameter
         if request.changed_since:
             params["changed_since"] = request.changed_since
-            
-        # Handle custom date range filtering (convert to changed_since if needed)
-        if request.date_from and not request.changed_since:
-            # Use date_from as changed_since for OpenSanctions API
+        elif request.date_from:
+            # Use date_from as changed_since if no explicit changed_since provided
             params["changed_since"] = request.date_from
             
-        logger.info(f"Searching OpenSanctions API: {opensanctions_url}/search/{request.dataset} with fuzzy={request.fuzzy}, simple={request.simple}, date_filters={bool(request.changed_since or request.date_from)}")
+        logger.info(f"Searching OpenSanctions API: {opensanctions_url}/search/{request.dataset}")
+        logger.debug(f"OpenSanctions API parameters: {params}")
         
         async with httpx.AsyncClient(timeout=30.0) as client:
-            # Try the main search first
-            response = await client.get(
-                f"{opensanctions_url}/search/{request.dataset}",
-                params=params
-            )
+            # Try matching endpoint first for better fuzzy matching results
+            response = None
+            try:
+                logger.info(f"Trying OpenSanctions matching endpoint: {opensanctions_url}/match/{request.dataset}")
+                
+                # Build matching query payload
+                match_query = {"name": request.query}
+                
+                # Add additional fields if available
+                if request.schema:
+                    match_query["schema"] = request.schema
+                if request.countries:
+                    match_query["country"] = request.countries[0] if isinstance(request.countries, list) else request.countries
+                
+                match_payload = {
+                    "queries": [match_query],
+                    "limit": request.limit,
+                    "threshold": 0.4,  # Lower threshold for more fuzzy results
+                    "dataset": request.dataset
+                }
+                
+                # Add dataset filters to payload if specified
+                if request.include_dataset:
+                    match_payload["include_dataset"] = request.include_dataset
+                if request.exclude_dataset:
+                    match_payload["exclude_dataset"] = request.exclude_dataset
+                if request.changed_since:
+                    match_payload["changed_since"] = request.changed_since
+                elif request.date_from:
+                    match_payload["changed_since"] = request.date_from
+                
+                match_response = await client.post(
+                    f"{opensanctions_url}/match/{request.dataset}",
+                    json=match_payload
+                )
+                
+                logger.debug(f"OpenSanctions matching API response status: {match_response.status_code}")
+                
+                if match_response.status_code == 200:
+                    match_data = match_response.json()
+                    match_results = match_data.get("results", [])
+                    
+                    # Convert matching results to search format
+                    if match_results and len(match_results) > 0:
+                        # Get the first query's results (we only send one query)
+                        query_matches = match_results[0].get("results", [])
+                        
+                        if len(query_matches) > 0:
+                            # Convert to search response format
+                            search_format_data = {
+                                "results": query_matches,
+                                "total": {"value": len(query_matches)},
+                                "dataset": request.dataset
+                            }
+                            response = type('Response', (), {
+                                'status_code': 200,
+                                'json': lambda: search_format_data
+                            })()
+                            logger.info(f"Matching endpoint returned {len(query_matches)} results")
+                        
+                # If matching fails or returns no results, fallback to search
+                if not response or response.status_code != 200:
+                    logger.info(f"Falling back to search endpoint: {opensanctions_url}/search/{request.dataset}")
+                    response = await client.get(
+                        f"{opensanctions_url}/search/{request.dataset}",
+                        params=params
+                    )
+                    logger.debug(f"OpenSanctions search API response status: {response.status_code}")
+                
+                if response.status_code != 200:
+                    logger.error(f"OpenSanctions API error {response.status_code}: {getattr(response, 'text', 'Unknown error')}")
+                    
+            except httpx.RequestError as e:
+                logger.error(f"OpenSanctions API request error: {str(e)}")
+                raise HTTPException(status_code=503, detail=f"OpenSanctions API unavailable: {str(e)}")
+            except Exception as e:
+                logger.error(f"Unexpected error calling OpenSanctions API: {str(e)}")
+                raise HTTPException(status_code=500, detail=f"Search service error: {str(e)}")
             
             # If we get few results, try additional search strategies
             if response.status_code == 200:
@@ -220,8 +321,13 @@ async def search_entities(
                     if entity.get("properties") and entity["properties"].get("alias"):
                         entity_aliases = entity["properties"]["alias"]
                     
-                    # Calculate fuzzy match confidence
-                    fuzzy_result = fuzzy_matching_service.match_names(
+                    # Calculate fuzzy match confidence with custom thresholds
+                    custom_fuzzy_service = FuzzyMatchingService(
+                        min_score_threshold=request.min_score_threshold,
+                        exact_match_threshold=request.exact_match_threshold,
+                        phonetic_threshold=request.phonetic_threshold
+                    )
+                    fuzzy_result = custom_fuzzy_service.match_names(
                         request.query, 
                         entity_name, 
                         entity_aliases
@@ -245,59 +351,9 @@ async def search_entities(
                     }
                     enhanced_results.append(enhanced_entity)
 
-                # Add Moroccan entities only as supplementary data with very low priority
-                moroccan_matches = []
-                if len(enhanced_results) < request.limit:
-                    moroccan_search_filters = {
-                        "schema_filter": request.schema,
-                        "risk_level": request.risk_level,
-                        "political_party": request.political_party,
-                        "region": request.region,
-                        "position_type": request.position_type,
-                        "mandate_year": request.mandate_year
-                    }
-                    
-                    # Get moroccan entities but drastically reduce their influence
-                    raw_moroccan = moroccan_entities_service.search_entities_enhanced(
-                        request.query, 
-                        **moroccan_search_filters
-                    )
-                    
-                    # Mark moroccan entities as supplementary with fuzzy matching
-                    for entity in raw_moroccan:
-                        # Calculate fuzzy matching for Moroccan entities
-                        entity_name = entity.get("caption", "") or entity.get("name", "")
-                        entity_aliases = entity.get("aliases", [])
-                        
-                        fuzzy_result = fuzzy_matching_service.match_names(
-                            request.query, 
-                            entity_name, 
-                            entity_aliases
-                        )
-                        
-                        # Ensure moroccan entities never outrank OpenSanctions
-                        entity["score"] = min(entity.get("score", 0) * 0.1, 0.1)  # Cap at 0.1
-                        entity["data_source"] = "moroccan_supplementary"
-                        entity["supplementary"] = True
-                        
-                        # Add fuzzy matching insights
-                        entity["match_confidence"] = round(fuzzy_result.score, 2)
-                        entity["match_type"] = fuzzy_result.match_type
-                        entity["match_details"] = {
-                            "normalized_query": fuzzy_result.normalized_query,
-                            "normalized_target": fuzzy_result.normalized_target,
-                            "algorithm_scores": {
-                                k: round(v, 2) for k, v in fuzzy_result.algorithm_scores.items()
-                            }
-                        }
-                    
-                    # Only add a few moroccan results if OpenSanctions has few results
-                    moroccan_matches = raw_moroccan[:2]  # Maximum 2 supplementary results
-                
-                # Keep OpenSanctions results first, exactly as returned by their API
+                # Use ONLY OpenSanctions results - no interference from custom datasets
+                # Preserve exact OpenSanctions Elasticsearch ranking and scoring
                 all_results = enhanced_results
-                if moroccan_matches and len(enhanced_results) < 5:  # Only add if OS has <5 results
-                    all_results.extend(moroccan_matches)
                 
                 # Apply pagination without any additional sorting - preserve OpenSanctions order
                 start_idx = request.offset
@@ -309,35 +365,37 @@ async def search_entities(
                     "total": {"value": len(all_results)},
                     "opensanctions_total": opensanctions_data.get("total", {"value": len(enhanced_results)}),
                     "opensanctions_results": len(enhanced_results),
-                    "moroccan_supplementary": len(moroccan_matches),
                     "query": request.query,
                     "dataset": request.dataset,
-                    "source": "opensanctions" if len(moroccan_matches) == 0 else "opensanctions+supplementary",
-                    "api_url": f"{opensanctions_url}/search/{request.dataset}",
+                    "source": "opensanctions",
+                    "api_url": f"{opensanctions_url}/match/{request.dataset}",
                     "status": "success",
-                    "note": "Results ordered by OpenSanctions relevance with fuzzy matching confidence scores"
+                    "note": "Results from OpenSanctions matching endpoint with fuzzy matching (fallback to search if needed)"
                 }
                 
-                # Save search to history (using all results)
-                history_source = "opensanctions" if len(moroccan_matches) == 0 else "opensanctions+supplementary"
-                await save_search_to_history(db, request, paginated_results, history_source, current_user.id)
+                # Save search to history (using OpenSanctions results only)
+                await save_search_to_history(db, request, paginated_results, "opensanctions", current_user.id)
                 
-                # Log audit action
-                audit_log = AuditLog(
-                    user_id=current_user.id,
-                    action="SEARCH_ENTITIES",
-                    resource=f"query:{request.query}",
-                    ip_address=http_request.client.host,
-                    user_agent=http_request.headers.get("user-agent"),
-                    extra_data={
-                        "dataset": request.dataset,
-                        "results_count": len(paginated_results),
-                        "opensanctions_results": len(enhanced_results),
-                        "moroccan_results": len(moroccan_matches)
-                    }
-                )
-                db.add(audit_log)
-                db.commit()
+                # Log basic audit action (fallback to simple logging)
+                try:
+                    audit_log = AuditLog(
+                        user_id=current_user.id,
+                        action="SEARCH_ENTITIES",
+                        resource=f"query:{request.query}",
+                        ip_address=http_request.client.host,
+                        user_agent=http_request.headers.get("user-agent"),
+                        extra_data={
+                            "dataset": request.dataset,
+                            "results_count": len(paginated_results),
+                            "opensanctions_results": len(enhanced_results),
+                            "source": "opensanctions_matching"
+                        }
+                    )
+                    db.add(audit_log)
+                    db.commit()
+                except Exception as audit_error:
+                    logger.warning(f"Audit logging failed for search: {str(audit_error)}")
+                    # Continue with search response even if audit logging fails
                 
                 return response_data
                 
@@ -778,6 +836,7 @@ async def get_search_details(
 @router.post("/entities/star")
 async def star_entity(
     request: StarEntityRequest, 
+    http_request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ) -> Dict[str, Any]:
@@ -823,6 +882,25 @@ async def star_entity(
         db.commit()
         db.refresh(starred_entity)
         
+        # Log blacklist action (basic audit)
+        try:
+            audit_log = AuditLog(
+                user_id=current_user.id,
+                action="BLACKLIST_ADD",
+                resource=f"entity:{request.entity_id}",
+                ip_address=http_request.client.host,
+                user_agent=http_request.headers.get("user-agent"),
+                extra_data={
+                    "entity_name": request.entity_name,
+                    "risk_level": request.risk_level,
+                    "relevance_score": request.relevance_score
+                }
+            )
+            db.add(audit_log)
+            db.commit()
+        except Exception as audit_error:
+            logger.warning(f"Audit logging failed for blacklist add: {str(audit_error)}")
+        
         return {
             "id": starred_entity.id,
             "entity_id": starred_entity.entity_id,
@@ -842,6 +920,7 @@ async def star_entity(
 async def unstar_entity(
     entity_id: str, 
     search_history_id: int, 
+    http_request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user)
 ) -> Dict[str, Any]:
@@ -857,8 +936,28 @@ async def unstar_entity(
         if not starred_entity:
             raise HTTPException(status_code=404, detail="Starred entity not found")
         
+        # Store entity info for audit log before deletion
+        entity_name = starred_entity.entity_name
+        
         db.delete(starred_entity)
         db.commit()
+        
+        # Log blacklist removal action (basic audit)
+        try:
+            audit_log = AuditLog(
+                user_id=current_user.id,
+                action="BLACKLIST_REMOVE",
+                resource=f"entity:{entity_id}",
+                ip_address=http_request.client.host,
+                user_agent=http_request.headers.get("user-agent"),
+                extra_data={
+                    "entity_name": entity_name
+                }
+            )
+            db.add(audit_log)
+            db.commit()
+        except Exception as audit_error:
+            logger.warning(f"Audit logging failed for blacklist remove: {str(audit_error)}")
         
         return {
             "entity_id": entity_id,
@@ -1632,7 +1731,7 @@ async def export_starred_entities_csv(
         
         # Write comprehensive headers
         writer.writerow([
-            'Entity ID', 'Entity Name', 'Risk Score', 'Risk Level', 'Tags',
+            'Entity ID', 'Entity Name', 'Risk Level', 'Tags',
             'Search Query', 'Search Date', 'Data Source', 'Starred Date',
             'Entity Type', 'Countries', 'Birth Country', 'Nationality', 'Citizenship',
             'Birth Date', 'Birth Place', 'Gender', 'Classification', 
@@ -1699,7 +1798,6 @@ async def export_starred_entities_csv(
             writer.writerow([
                 entity.entity_id,
                 entity.entity_name,
-                entity.relevance_score or 0,
                 entity.risk_level or 'LOW',
                 entity.tags or '',
                 entity.search_history.query,
@@ -1837,7 +1935,6 @@ async def export_starred_entities_pdf(
                 
                 # Basic information
                 entity_details = [
-                    ['Risk Score:', f"{entity.relevance_score or 0}%"],
                     ['Risk Level:', entity.risk_level or 'LOW'],
                     ['Entity Type:', entity_info.get('schema', 'Unknown')],
                     ['Search Query:', entity.search_history.query],
@@ -2019,7 +2116,6 @@ async def get_filter_options() -> Dict[str, Any]:
                 {"name": "Organization", "label": "Organization", "count": 0}
             ],
             "sort_options": [
-                {"name": "score", "label": "Relevance"},
                 {"name": "name", "label": "Name"},
                 {"name": "updated", "label": "Last Updated"},
                 {"name": "created", "label": "Created"}
@@ -2217,26 +2313,30 @@ async def process_batch_screening(
         # Save batch processing to search history
         await save_batch_to_history(db, batch_result, file.filename, current_user.id)
         
-        # Log audit action
-        audit_log = AuditLog(
-            user_id=current_user.id,
-            action="BATCH_SCREENING",
-            resource=f"file:{file.filename}",
-            ip_address=request.client.host,
-            user_agent=request.headers.get("user-agent"),
-            extra_data={
-                "filename": file.filename,
-                "template_type": template_type,
-                "dataset": dataset,
-                "entities_count": len(entities),
-                "successful_count": batch_result.successful_records,
-                "failed_count": batch_result.failed_records,
-                "processing_time_ms": batch_result.processing_time_ms,
-                "job_id": batch_result.job_id
-            }
-        )
-        db.add(audit_log)
-        db.commit()
+        # Log basic audit action for batch processing (fallback)
+        try:
+            audit_log = AuditLog(
+                user_id=current_user.id,
+                action="BATCH_SCREENING",
+                resource=f"file:{file.filename}",
+                ip_address=request.client.host,
+                user_agent=request.headers.get("user-agent"),
+                extra_data={
+                    "filename": file.filename,
+                    "template_type": template_type,
+                    "dataset": dataset,
+                    "entities_count": len(entities),
+                    "successful_count": batch_result.successful_records,
+                    "failed_count": batch_result.failed_records,
+                    "processing_time_ms": batch_result.processing_time_ms,
+                    "job_id": batch_result.job_id
+                }
+            )
+            db.add(audit_log)
+            db.commit()
+        except Exception as audit_error:
+            logger.warning(f"Audit logging failed for batch processing: {str(audit_error)}")
+            # Continue with batch processing response even if audit logging fails
         
         return {
             "job_id": batch_result.job_id,

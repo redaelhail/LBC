@@ -5,6 +5,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from typing import Dict, Any
 from pydantic import BaseModel, EmailStr
+import logging
 
 from app.core.auth import (
     authenticate_user, 
@@ -17,7 +18,9 @@ from app.core.config import settings
 from app.database import get_db
 from app.models.user import User, UserRole
 from app.models.audit_log import AuditLog
+from app.services.audit_service import get_audit_service
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 class UserCreate(BaseModel):
@@ -156,17 +159,32 @@ async def login(
     
     user = authenticate_user(db, login_data.email, login_data.password)
     if not user:
-        # Log failed login attempt
-        audit_log = AuditLog(
-            user_id=None,
-            action="LOGIN_FAILED",
-            resource=login_data.email,
-            ip_address=request.client.host,
-            user_agent=request.headers.get("user-agent"),
-            extra_data={"reason": "invalid_credentials"}
-        )
-        db.add(audit_log)
-        db.commit()
+        # Log failed login attempt with enhanced audit service
+        try:
+            audit_service = get_audit_service(db)
+            audit_service.log_authentication(
+                user_id=None,
+                action="LOGIN_FAILED",
+                request=request,
+                username=login_data.email,
+                success=False,
+                failure_reason="invalid_credentials"
+            )
+        except Exception as audit_error:
+            logger.warning(f"Enhanced audit logging failed for failed login: {str(audit_error)}")
+            # Fallback to basic logging
+            try:
+                log_audit_action(
+                    db=db,
+                    user_id=None,
+                    action="LOGIN_FAILED",
+                    resource=login_data.email,
+                    ip_address=request.client.host,
+                    user_agent=request.headers.get("user-agent"),
+                    extra_data={"reason": "invalid_credentials"}
+                )
+            except Exception as fallback_error:
+                logger.error(f"Both enhanced and basic audit logging failed: {str(fallback_error)}")
         
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -189,14 +207,29 @@ async def login(
         subject=user.id, expires_delta=access_token_expires
     )
     
-    # Log successful login
-    log_audit_action(
-        db=db,
-        user_id=user.id,
-        action="LOGIN_SUCCESS",
-        ip_address=request.client.host,
-        user_agent=request.headers.get("user-agent")
-    )
+    # Log successful login with enhanced audit service
+    try:
+        audit_service = get_audit_service(db)
+        audit_service.log_authentication(
+            user_id=user.id,
+            action="LOGIN_SUCCESS",
+            request=request,
+            username=user.email,
+            success=True
+        )
+    except Exception as audit_error:
+        logger.warning(f"Enhanced audit logging failed for successful login: {str(audit_error)}")
+        # Fallback to basic logging
+        try:
+            log_audit_action(
+                db=db,
+                user_id=user.id,
+                action="LOGIN_SUCCESS",
+                ip_address=request.client.host,
+                user_agent=request.headers.get("user-agent")
+            )
+        except Exception as fallback_error:
+            logger.error(f"Both enhanced and basic audit logging failed: {str(fallback_error)}")
     
     return Token(
         access_token=access_token,
@@ -212,15 +245,88 @@ async def logout(
 ) -> Dict[str, str]:
     """Logout user (log audit action)"""
     
-    log_audit_action(
-        db=db,
-        user_id=current_user.id,
-        action="LOGOUT",
-        ip_address=request.client.host,
-        user_agent=request.headers.get("user-agent")
-    )
+    # Log logout with enhanced audit service
+    try:
+        audit_service = get_audit_service(db)
+        audit_service.log_authentication(
+            user_id=current_user.id,
+            action="LOGOUT",
+            request=request,
+            username=current_user.email,
+            success=True
+        )
+    except Exception as audit_error:
+        logger.warning(f"Enhanced audit logging failed for logout: {str(audit_error)}")
+        # Fallback to basic logging
+        try:
+            log_audit_action(
+                db=db,
+                user_id=current_user.id,
+                action="LOGOUT",
+                ip_address=request.client.host,
+                user_agent=request.headers.get("user-agent")
+            )
+        except Exception as fallback_error:
+            logger.error(f"Both enhanced and basic audit logging failed: {str(fallback_error)}")
     
     return {"message": "Successfully logged out"}
+
+@router.get("/debug-admin")
+async def debug_admin_user(db: Session = Depends(get_db)) -> Dict[str, Any]:
+    """Debug endpoint to check admin user status (temporary)"""
+    try:
+        admin_email = "admin@sanctionsguard.com"
+        admin_password = "admin123"
+        
+        # Check if admin user exists
+        admin_user = db.query(User).filter(User.email == admin_email).first()
+        
+        if not admin_user:
+            # Create admin user if it doesn't exist
+            from app.core.auth import get_password_hash
+            
+            admin_user = User(
+                username="admin",
+                email=admin_email,
+                hashed_password=get_password_hash(admin_password),
+                full_name="System Administrator",
+                role="admin",
+                is_superuser=True,
+                is_active=True
+            )
+            
+            db.add(admin_user)
+            db.commit()
+            db.refresh(admin_user)
+            
+            return {
+                "status": "admin_user_created",
+                "message": "Admin user was created",
+                "email": admin_email,
+                "password": admin_password,
+                "user_id": admin_user.id
+            }
+        else:
+            from app.core.auth import verify_password
+            password_valid = verify_password(admin_password, admin_user.hashed_password)
+            
+            return {
+                "status": "admin_user_exists",
+                "message": "Admin user exists",
+                "email": admin_email,
+                "password": admin_password,
+                "user_id": admin_user.id,
+                "is_active": admin_user.is_active,
+                "is_superuser": admin_user.is_superuser,
+                "role": admin_user.role,
+                "password_valid": password_valid
+            }
+            
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Debug failed: {str(e)}"
+        }
 
 @router.get("/me", response_model=UserResponse)
 async def get_current_user_info(
