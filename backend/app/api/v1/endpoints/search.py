@@ -48,14 +48,17 @@ class SearchRequest(BaseModel):
     date_from: Optional[str] = None      # Start date for date range filtering
     date_to: Optional[str] = None        # End date for date range filtering
     
-    # Client-side settings (not sent to OpenSanctions API)
-    fuzzy: bool = True  # For frontend display only
-    simple: bool = True  # For frontend display only
+    # OpenSanctions API boolean parameters
+    fuzzy: bool = True  # Allow fuzzy query syntax
+    simple: bool = True  # Use simple syntax for user-facing query boxes
     
-    # Configurable match thresholds
-    min_score_threshold: Optional[float] = 75.0     # Minimum confidence score for matches
-    exact_match_threshold: Optional[float] = 95.0   # Threshold for exact match classification
-    phonetic_threshold: Optional[float] = 80.0      # Threshold for phonetic match classification
+    # Additional OpenSanctions parameters
+    facets: Optional[List[str]] = None  # Facet counts to include in response
+    filter_op: Optional[str] = "OR"     # Logic for combining multiple filters
+    
+    # Simple threshold parameter for result filtering
+    threshold: Optional[float] = 75.0   # Minimum match quality (client-side filtering)
+    
     
     # Morocco-specific filters (for moroccan_entities dataset)
     risk_level: Optional[List[str]] = None
@@ -146,7 +149,15 @@ async def search_entities(
             "limit": request.limit
         }
         
-        # Note: offset, filter_op, fuzzy, simple, facets are NOT supported by OpenSanctions API
+        # Add OpenSanctions-supported parameters
+        if hasattr(request, 'fuzzy') and request.fuzzy:
+            params["fuzzy"] = request.fuzzy
+        if hasattr(request, 'simple') and request.simple:
+            params["simple"] = request.simple
+        if hasattr(request, 'facets') and request.facets:
+            params["facets"] = request.facets
+        if hasattr(request, 'filter_op') and request.filter_op:
+            params["filter_op"] = request.filter_op
         
         # Basic filters - ensure arrays are properly formatted
         if request.schema:
@@ -317,70 +328,23 @@ async def search_entities(
             if response.status_code == 200:
                 opensanctions_data = response.json()
                 
-                # Use OpenSanctions results as-is, maintaining original order and scores
+                # Return pure OpenSanctions results without any backend processing
                 opensanctions_results = opensanctions_data.get("results", [])
                 
-                # Add fuzzy matching analysis without changing OpenSanctions scores or order
-                enhanced_results = []
-                for entity in opensanctions_results:
-                    # Perform fuzzy matching analysis
-                    entity_name = entity.get("caption", "")
-                    entity_aliases = []
-                    
-                    # Extract aliases from properties if available
-                    if entity.get("properties") and entity["properties"].get("alias"):
-                        entity_aliases = entity["properties"]["alias"]
-                    
-                    # Calculate fuzzy match confidence with custom thresholds
-                    custom_fuzzy_service = FuzzyMatchingService(
-                        min_score_threshold=request.min_score_threshold,
-                        exact_match_threshold=request.exact_match_threshold,
-                        phonetic_threshold=request.phonetic_threshold
-                    )
-                    fuzzy_result = custom_fuzzy_service.match_names(
-                        request.query, 
-                        entity_name, 
-                        entity_aliases
-                    )
-                    
-                    # Keep original OpenSanctions entity completely intact, add fuzzy analysis
-                    enhanced_entity = {
-                        **entity,
-                        # Original OpenSanctions score and data preserved
-                        "risk_level": get_risk_level_from_opensanctions_score(entity.get("score", 0)),
-                        # Add fuzzy matching insights
-                        "match_confidence": round(fuzzy_result.score, 2),
-                        "match_type": fuzzy_result.match_type,
-                        "match_details": {
-                            "normalized_query": fuzzy_result.normalized_query,
-                            "normalized_target": fuzzy_result.normalized_target,
-                            "algorithm_scores": {
-                                k: round(v, 2) for k, v in fuzzy_result.algorithm_scores.items()
-                            }
-                        }
-                    }
-                    enhanced_results.append(enhanced_entity)
-
-                # Use ONLY OpenSanctions results - no interference from custom datasets
-                # Preserve exact OpenSanctions Elasticsearch ranking and scoring
-                all_results = enhanced_results
-                
-                # Apply pagination without any additional sorting - preserve OpenSanctions order
+                # Apply only OpenSanctions native pagination
                 start_idx = request.offset
-                end_idx = start_idx + request.limit
-                paginated_results = all_results[start_idx:end_idx]
+                end_idx = start_idx + request.limit if request.limit else len(opensanctions_results)
+                paginated_results = opensanctions_results[start_idx:end_idx]
                 
                 response_data = {
                     "results": paginated_results,
-                    "total": {"value": len(all_results)},
-                    "opensanctions_total": opensanctions_data.get("total", {"value": len(enhanced_results)}),
-                    "opensanctions_results": len(enhanced_results),
+                    "total": opensanctions_data.get("total", {"value": len(opensanctions_results)}),
                     "query": request.query,
                     "dataset": request.dataset,
                     "source": "opensanctions",
-                    "api_url": f"{opensanctions_url}/match/{request.dataset}",
+                    "api_url": f"{opensanctions_url}/search/{request.dataset}",
                     "status": "success",
-                    "note": "Results from OpenSanctions matching endpoint with fuzzy matching (fallback to search if needed)"
+                    "note": "Pure OpenSanctions API results without backend processing"
                 }
                 
                 # Save search to history (using OpenSanctions results only)
@@ -397,8 +361,8 @@ async def search_entities(
                         extra_data={
                             "dataset": request.dataset,
                             "results_count": len(paginated_results),
-                            "opensanctions_results": len(enhanced_results),
-                            "source": "opensanctions_matching"
+                            "opensanctions_results": len(opensanctions_results),
+                            "source": "opensanctions_pure"
                         }
                     )
                     db.add(audit_log)
@@ -427,7 +391,7 @@ async def search_entities(
                 })
                 # Save fallback search to history
                 mock_results = fallback_response["results"]
-                await save_search_to_history(db, request, mock_results, "mock")
+                await save_search_to_history(db, request, mock_results, "mock", current_user.id)
                 return fallback_response
                 
             elif response.status_code == 404:
@@ -438,7 +402,7 @@ async def search_entities(
                     "http_status": 404
                 })
                 mock_results = fallback_response["results"]
-                await save_search_to_history(db, request, mock_results, "mock")
+                await save_search_to_history(db, request, mock_results, "mock", current_user.id)
                 return fallback_response
                 
             else:
@@ -449,7 +413,7 @@ async def search_entities(
                     "http_status": response.status_code
                 })
                 mock_results = fallback_response["results"]
-                await save_search_to_history(db, request, mock_results, "mock")
+                await save_search_to_history(db, request, mock_results, "mock", current_user.id)
                 return fallback_response
                 
     except httpx.TimeoutException:
@@ -459,7 +423,7 @@ async def search_entities(
             "message": "OpenSanctions API timeout - service may be overloaded"
         })
         mock_results = fallback_response["results"]
-        await save_search_to_history(db, request, mock_results, "mock")
+        await save_search_to_history(db, request, mock_results, "mock", current_user.id)
         return fallback_response
         
     except httpx.ConnectError:
@@ -469,7 +433,7 @@ async def search_entities(
             "message": "Cannot connect to OpenSanctions API - service may be down"
         })
         mock_results = fallback_response["results"]
-        await save_search_to_history(db, request, mock_results, "mock")
+        await save_search_to_history(db, request, mock_results, "mock", current_user.id)
         return fallback_response
         
     except Exception as e:
@@ -479,7 +443,7 @@ async def search_entities(
             "message": str(e)
         })
         mock_results = fallback_response["results"]
-        await save_search_to_history(db, request, mock_results, "mock")
+        await save_search_to_history(db, request, mock_results, "mock", current_user.id)
         return fallback_response
 
 async def check_opensanctions_health() -> Dict[str, Any]:

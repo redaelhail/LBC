@@ -35,13 +35,11 @@ interface SupervisedEntity {
   pep_exposure?: boolean;
   foreign_clients_ratio?: number;
   cash_transactions_volume?: number;
-  high_risk_countries_exposure?: number;
   created_at: string;
   updated_at: string;
   notes?: string;
   directors: EntityDirector[];
   lbc_contacts: EntityLBCContact[];
-  current_risk_score?: RiskScore;
 }
 
 interface EntityDirector {
@@ -52,7 +50,6 @@ interface EntityDirector {
   appointment_date: string;
   is_active: boolean;
   tenure_years: number;
-  risk_flags: string[];
 }
 
 interface EntityLBCContact {
@@ -67,14 +64,6 @@ interface EntityLBCContact {
   training_status: string;
 }
 
-interface RiskScore {
-  id: number;
-  score_type: string;
-  score_value: number;
-  risk_level: string;
-  scoring_date: string;
-  status: string;
-}
 
 const EntityProfile: React.FC<EntityProfileProps> = ({ entityId }) => {
   const [entity, setEntity] = useState<SupervisedEntity | null>(null);
@@ -141,15 +130,6 @@ const EntityProfile: React.FC<EntityProfileProps> = ({ entityId }) => {
     });
   };
 
-  const getRiskLevelColor = (level: string) => {
-    switch (level?.toLowerCase()) {
-      case 'low': return 'text-green-600 bg-green-50';
-      case 'medium': return 'text-yellow-600 bg-yellow-50';
-      case 'high': return 'text-orange-600 bg-orange-50';
-      case 'critical': return 'text-red-600 bg-red-50';
-      default: return 'text-gray-600 bg-gray-50';
-    }
-  };
 
   const getStatusColor = (status: string) => {
     switch (status?.toLowerCase()) {
@@ -220,11 +200,6 @@ const EntityProfile: React.FC<EntityProfileProps> = ({ entityId }) => {
                 <span className="text-sm text-gray-500">
                   {entity.category.replace('_', ' ').toUpperCase()}
                 </span>
-                {entity.current_risk_score && (
-                  <span className={`px-3 py-1 rounded-full text-sm font-medium ${getRiskLevelColor(entity.current_risk_score.risk_level)}`}>
-                    Risque: {entity.current_risk_score.risk_level.toUpperCase()}
-                  </span>
-                )}
               </div>
             </div>
           </div>
@@ -241,7 +216,6 @@ const EntityProfile: React.FC<EntityProfileProps> = ({ entityId }) => {
           <nav className="-mb-px flex space-x-8 px-6">
             {[
               { id: 'overview', label: 'Vue d\'ensemble', icon: Building2 },
-              { id: 'risk', label: 'Évaluation des risques', icon: Shield },
               { id: 'directors', label: 'Dirigeants', icon: Users },
               { id: 'contacts', label: 'Contacts LBC/FT', icon: Mail }
             ].map((tab) => (
@@ -371,73 +345,11 @@ const EntityProfile: React.FC<EntityProfileProps> = ({ entityId }) => {
                       {formatCurrency(entity.cash_transactions_volume)}
                     </div>
                   </div>
-                  <div className="bg-yellow-50 border border-yellow-200 p-4 rounded-lg">
-                    <div className="text-sm font-medium text-yellow-800">Exposition pays à risque</div>
-                    <div className="mt-1 text-sm text-yellow-700">
-                      {entity.high_risk_countries_exposure ? `${(entity.high_risk_countries_exposure * 100).toFixed(1)}%` : 'N/A'}
-                    </div>
-                  </div>
                 </div>
               </div>
             </div>
           )}
 
-          {/* Risk Tab */}
-          {activeTab === 'risk' && (
-            <div className="space-y-6">
-              <div>
-                <h3 className="text-lg font-medium text-gray-900 mb-4 flex items-center">
-                  <Shield className="h-5 w-5 mr-2" />
-                  Évaluation des risques actuelle
-                </h3>
-                {entity.current_risk_score ? (
-                  <div className="bg-gray-50 p-6 rounded-lg">
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                      <div className="text-center">
-                        <div className="text-3xl font-bold text-gray-900">
-                          {entity.current_risk_score.score_value.toFixed(1)}
-                        </div>
-                        <div className="text-sm text-gray-500 mt-1">Score de risque</div>
-                        <div className={`mt-2 px-3 py-1 rounded-full text-sm font-medium ${getRiskLevelColor(entity.current_risk_score.risk_level)}`}>
-                          {entity.current_risk_score.risk_level.toUpperCase()}
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-sm font-medium text-gray-500">Type d'évaluation</div>
-                        <div className="mt-1 text-sm text-gray-900">
-                          {entity.current_risk_score.score_type.replace('_', ' ')}
-                        </div>
-                        <div className="text-sm font-medium text-gray-500 mt-3">Date d'évaluation</div>
-                        <div className="mt-1 text-sm text-gray-900">
-                          {formatDate(entity.current_risk_score.scoring_date)}
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-sm font-medium text-gray-500">Statut</div>
-                        <div className="mt-1">
-                          <span className={`px-2 py-1 rounded text-xs font-medium ${
-                            entity.current_risk_score.status === 'approved' 
-                              ? 'bg-green-100 text-green-800'
-                              : 'bg-yellow-100 text-yellow-800'
-                          }`}>
-                            {entity.current_risk_score.status}
-                          </span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="text-center p-8 bg-gray-50 rounded-lg">
-                    <Shield className="h-12 w-12 text-gray-400 mx-auto mb-4" />
-                    <p className="text-gray-600">Aucune évaluation de risque disponible</p>
-                    <button className="mt-4 bg-blue-600 text-white px-4 py-2 rounded-md hover:bg-blue-700">
-                      Lancer une évaluation
-                    </button>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
 
           {/* Directors Tab */}
           {activeTab === 'directors' && (
@@ -476,18 +388,6 @@ const EntityProfile: React.FC<EntityProfileProps> = ({ entityId }) => {
                               {director.tenure_years} années d'ancienneté
                             </span>
                           </div>
-                          {director.risk_flags.length > 0 && (
-                            <div className="mt-3">
-                              <div className="text-sm font-medium text-red-600 mb-1">Signalements:</div>
-                              <div className="flex flex-wrap gap-1">
-                                {director.risk_flags.map((flag, index) => (
-                                  <span key={index} className="inline-flex items-center px-2 py-1 rounded text-xs font-medium bg-red-100 text-red-800">
-                                    {flag}
-                                  </span>
-                                ))}
-                              </div>
-                            </div>
-                          )}
                         </div>
                       </div>
                     </div>

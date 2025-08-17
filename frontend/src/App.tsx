@@ -1,7 +1,9 @@
 import React, { useState, useEffect, useRef, useCallback, memo, useMemo } from 'react';
-import { Search, User, Building, AlertCircle, CheckCircle, Loader2, History, FileText, Globe, Calendar, Download, Eye, Plus, Edit, Trash2, Save, X, MessageSquare, Star, Filter, TrendingUp, BarChart3, Activity, Clock, Shield, UserIcon, Settings, Users, UserX, UserCheck, Key, Building2, Target, Upload, ChevronRight } from 'lucide-react';
+import { Search, User, Building, AlertCircle, CheckCircle, Loader2, History, FileText, Globe, Calendar, Download, Eye, Plus, Edit, Trash2, Save, X, MessageSquare, Star, Filter, TrendingUp, BarChart3, Activity, Clock, Shield, UserIcon, Settings, Users, UserX, UserCheck, Key, Building2, Target, Upload, ChevronRight, BookOpen, Copy } from 'lucide-react';
 import EntityManagement from './components/EntityManagement';
 import BatchUpload from './components/BatchUpload';
+import Documentation from './components/Documentation';
+import AdvancedSearchFilters from './components/AdvancedSearchFilters';
 
 // Simple Login Component
 const LoginForm = () => {
@@ -224,7 +226,7 @@ const MainApp = () => {
   const [selectedSearch, setSelectedSearch] = useState(null);
   const [showNotes, setShowNotes] = useState(false);
   const [notes, setNotes] = useState({});
-  const [newNote, setNewNote] = useState({ entityId: '', entityName: '', text: '', riskAssessment: '', actionTaken: '' });
+  const [newNote, setNewNote] = useState({ entityId: '', entityName: '', text: '', actionTaken: '' });
   const [editingNote, setEditingNote] = useState(null);
   const [currentSearchId, setCurrentSearchId] = useState(null);
   const [showInlineNoteForm, setShowInlineNoteForm] = useState(null);
@@ -232,7 +234,7 @@ const MainApp = () => {
   const [confirmUnblacklist, setConfirmUnblacklist] = useState(null); // Entity to confirm unblacklisting
   const [confirmDialog, setConfirmDialog] = useState(null); // Generic confirmation dialog
   const [analytics, setAnalytics] = useState(null);
-  const [historyFilter, setHistoryFilter] = useState('all'); // all, starred, high-risk, etc.
+  const [historyFilter, setHistoryFilter] = useState('all'); // all, matches, clean, etc.
   const [expandedDetails, setExpandedDetails] = useState(new Set()); // Track which results have expanded details
   const [blacklistedEntities, setBlacklistedEntities] = useState([]);
   const [isLoadingBlacklisted, setIsLoadingBlacklisted] = useState(false);
@@ -247,39 +249,35 @@ const MainApp = () => {
   const [whitelist, setWhitelist] = useState([]); // Entities confirmed as false positives
   const [whitelistMap, setWhitelistMap] = useState(new Map()); // entityId -> whitelisted entity for fast lookup
   
-  // Enhanced search parameters
-  const [showAdvancedSearch, setShowAdvancedSearch] = useState(false);
+  // OpenSanctions search parameters
   const [searchFilters, setSearchFilters] = useState({
-    // Basic search fields
-    first_name: '',
-    last_name: '',
-    birth_date: '',
-    place_of_birth: '',
-    passport_number: '',
-    id_number: '',
-    role: '',
-    country: '',
-    topics: [],  // Topics filtering for PEP, sanctions, crime, etc.
-    entity_type: 'Person',
-    search_type: 'fuzzy',  // Default to fuzzy search for better results
-    dataset: '',
-    fuzzy: true,  // Enable OpenSanctions fuzzy matching by default
-    simple: true,  // Enable simple syntax for better user experience
-    // Date range filtering
-    date_from: '',
-    date_to: '',
-    changed_since: '',
-    // Results display options
-    limit: 10,  // Number of results to display
-    // Configurable match thresholds
-    min_score_threshold: 75.0,     // Minimum confidence score for matches
-    exact_match_threshold: 95.0,   // Threshold for exact match classification
-    phonetic_threshold: 80.0       // Threshold for phonetic match classification
+    // OpenSanctions API parameters
+    schema: '',      // Entity type (Person, Organization, Company, Asset)
+    topics: [],      // Topics (sanction, role.pep, crime, etc.)
+    countries: [],   // Country codes for geographic filtering
+    datasets: [],    // Specific dataset filters
+    
+    // Search behavior
+    fuzzy: true,     // Enable fuzzy matching
+    simple: true,    // Use simple search algorithm
+    threshold: 75,   // Match quality threshold (50-95%)
+    limit: 10        // Number of results to display
   });
   
   // Refs to maintain focus
   const searchInputRef = useRef(null);
   const dashboardInputRef = useRef(null);
+  
+  // Debug state for displaying OpenSanctions API URL
+  const [debugOpenSanctionsUrl, setDebugOpenSanctionsUrl] = useState('');
+  
+  // Search options panel state (persistent across re-renders)
+  const [searchOptionsExpanded, setSearchOptionsExpanded] = useState(false);
+  const [searchSectionsExpanded, setSearchSectionsExpanded] = useState({
+    searchType: true,
+    refinements: true,
+    quality: false
+  });
 
   // Load search history when history tab is opened
   useEffect(() => {
@@ -324,7 +322,6 @@ const MainApp = () => {
         entity_name: entity.caption || entity.name || 'Unknown Entity',
         entity_data: entity,
         relevance_score: 0,
-        risk_level: entity.risk_level || 'HIGH', // Blacklisted entities are high risk
         user_id: 1
       };
       
@@ -425,7 +422,7 @@ const MainApp = () => {
       reason: reason,
       flaggedAt: new Date().toISOString(),
       status: 'pending', // pending, approved, rejected, needs_more_info
-      confidence: getMatchConfidence(entity),
+      confidence: null,
       searchId: currentSearchId // Include search context for blacklisting
     };
     
@@ -490,7 +487,6 @@ const MainApp = () => {
         entity_name: reviewItem.entity.caption || reviewItem.entity.name || 'Unknown Entity',
         entity_data: reviewItem.entity,
         relevance_score: 0,
-        risk_level: reviewItem.entity.risk_level || 'HIGH', // Blacklisted entities are high risk
         user_id: 1,
         notes: `Added to blacklist from review queue - ${reviewItem.reason}`
       };
@@ -522,19 +518,17 @@ const MainApp = () => {
     }
   };
 
-  // Auto-flag borderline matches based on confidence thresholds
+  // Auto-flag matches for manual review based on OpenSanctions topics
   const checkForBorderlineCases = (results) => {
     results.forEach(result => {
-      const confidence = getMatchConfidence(result);
-      const minThreshold = searchFilters.min_score_threshold || 75;
-      const exactThreshold = searchFilters.exact_match_threshold || 95;
+      // Flag sanctioned entities for review
+      if (result.properties?.topics?.includes('sanction')) {
+        flagForReview(result, 'Sanctioned entity detected');
+      }
       
-      // Auto-flag if confidence is between min threshold and a buffer zone
-      const bufferZone = 10; // Flag matches within 10% of thresholds
-      if (confidence >= minThreshold && confidence < (minThreshold + bufferZone)) {
-        flagForReview(result, `Low confidence match (${confidence}%)`);
-      } else if (confidence >= exactThreshold - bufferZone && confidence < exactThreshold) {
-        flagForReview(result, `Near-exact match requiring verification (${confidence}%)`);
+      // Flag PEP entities for review
+      if (result.properties?.topics?.includes('pep')) {
+        flagForReview(result, 'PEP (Politically Exposed Person) detected');
       }
     });
   };
@@ -1107,6 +1101,57 @@ const MainApp = () => {
     }
   };
 
+  // Generate debug OpenSanctions URL based on current filters
+  const generateDebugUrl = useCallback((query, filters) => {
+    if (!query?.trim()) return '';
+    
+    // Build enhanced query like the backend does
+    const search_terms = [query];
+    if (filters.first_name) search_terms.push(filters.first_name);
+    if (filters.last_name) search_terms.push(filters.last_name);
+    if (filters.place_of_birth) search_terms.push(filters.place_of_birth);
+    if (filters.passport_number) search_terms.push(filters.passport_number);
+    if (filters.id_number) search_terms.push(filters.id_number);
+    if (filters.role) search_terms.push(filters.role);
+    
+    const enhanced_query = search_terms.join(' ').trim();
+    
+    const openSanctionsParams = new URLSearchParams();
+    openSanctionsParams.append('q', enhanced_query);
+    
+    // Add filters that would be sent to OpenSanctions
+    if (filters.schema && filters.schema !== '') {
+      openSanctionsParams.append('schema', filters.schema);
+    }
+    if (filters.countries && filters.countries.length > 0) {
+      filters.countries.forEach(country => openSanctionsParams.append('countries', country));
+    }
+    if (filters.topics && filters.topics.length > 0) {
+      filters.topics.forEach(topic => openSanctionsParams.append('topics', topic));
+    }
+    if (filters.datasets && filters.datasets.length > 0) {
+      filters.datasets.forEach(dataset => openSanctionsParams.append('datasets', dataset));
+    }
+    
+    openSanctionsParams.append('limit', filters.limit.toString());
+    
+    // Add OpenSanctions-specific flags (backend defaults these to true)
+    openSanctionsParams.append('fuzzy', 'true');
+    openSanctionsParams.append('simple', 'true');
+    
+    // Add threshold if different from default
+    if (filters.threshold && filters.threshold !== 75) {
+      openSanctionsParams.append('threshold', filters.threshold.toString());
+    }
+    
+    return `http://localhost:9000/search/default?${openSanctionsParams.toString()}`;
+  }, []);
+
+  // Update debug URL whenever search query or filters change
+  useEffect(() => {
+    const debugUrl = generateDebugUrl(searchQuery, searchFilters);
+    setDebugOpenSanctionsUrl(debugUrl);
+  }, [searchQuery, searchFilters, generateDebugUrl]);
 
   const performSearch = useCallback(async (query) => {
     if (!query.trim()) {
@@ -1131,26 +1176,12 @@ const MainApp = () => {
         fuzzy: true,  // For UI display only
         simple: true, // For UI display only
         // Add non-empty filters using correct OpenSanctions API parameters
-        ...(searchFilters.entity_type && { schema: searchFilters.entity_type }),
-        ...(searchFilters.country && { countries: [searchFilters.country] }),
-        // Enhanced search options
-        ...(searchFilters.topics && { topics: searchFilters.topics }),
-        // Date range filtering
-        ...(searchFilters.changed_since && { changed_since: searchFilters.changed_since }),
-        ...(searchFilters.date_from && { date_from: searchFilters.date_from }),
-        ...(searchFilters.date_to && { date_to: searchFilters.date_to }),
-        // Configurable match thresholds
-        min_score_threshold: searchFilters.min_score_threshold,
-        exact_match_threshold: searchFilters.exact_match_threshold,
-        phonetic_threshold: searchFilters.phonetic_threshold,
-        // Additional search criteria
-        ...(searchFilters.place_of_birth && { place_of_birth: searchFilters.place_of_birth }),
-        ...(searchFilters.passport_number && { passport_number: searchFilters.passport_number }),
-        ...(searchFilters.id_number && { id_number: searchFilters.id_number }),
-        ...(searchFilters.birth_date && { birth_date: searchFilters.birth_date }),
-        ...(searchFilters.first_name && { first_name: searchFilters.first_name }),
-        ...(searchFilters.last_name && { last_name: searchFilters.last_name }),
-        ...(searchFilters.role && { role: searchFilters.role })
+        ...(searchFilters.schema && searchFilters.schema !== '' && { schema: searchFilters.schema }),
+        ...(searchFilters.countries && searchFilters.countries.length > 0 && { countries: searchFilters.countries }),
+        ...(searchFilters.topics && searchFilters.topics.length > 0 && { topics: searchFilters.topics }),
+        ...(searchFilters.datasets && searchFilters.datasets.length > 0 && { datasets: searchFilters.datasets }),
+        // Match quality threshold
+        threshold: searchFilters.threshold
       };
       
       const token = localStorage.getItem('access_token');
@@ -1193,33 +1224,9 @@ const MainApp = () => {
   }, []);
 
 
-  const getRiskLevelColor = (level) => {
-    switch (level) {
-      case 'High': return 'text-red-600 bg-red-100';
-      case 'Medium': return 'text-yellow-600 bg-yellow-100';
-      case 'Low': return 'text-green-600 bg-green-100';
-      default: return 'text-gray-600 bg-gray-100';
-    }
-  };
 
 
-  const getMatchConfidence = (result) => {
-    return result.match_confidence || 0;
-  };
 
-  const getMatchType = (result) => {
-    return result.match_type || 'unknown';
-  };
-
-  const getMatchTypeColor = (matchType) => {
-    switch (matchType) {
-      case 'exact': return 'text-green-800 bg-green-100';
-      case 'fuzzy': return 'text-blue-800 bg-blue-100';
-      case 'phonetic': return 'text-purple-800 bg-purple-100';
-      case 'no_match': return 'text-gray-600 bg-gray-100';
-      default: return 'text-gray-600 bg-gray-100';
-    }
-  };
 
   const formatDate = (dateString) => {
     return new Date(dateString).toLocaleDateString() + ' ' + new Date(dateString).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
@@ -1249,7 +1256,7 @@ const MainApp = () => {
     }
   };
 
-  const addNote = async (entityId, entityName, noteText, riskAssessment = '', actionTaken = '') => {
+  const addNote = async (entityId, entityName, noteText, actionTaken = '') => {
     if (!selectedSearch || !noteText.trim()) return;
     
     try {
@@ -1264,7 +1271,6 @@ const MainApp = () => {
           entity_id: entityId,
           entity_name: entityName,
           note_text: noteText,
-          risk_assessment: riskAssessment,
           action_taken: actionTaken
         })
       });
@@ -1272,7 +1278,7 @@ const MainApp = () => {
       if (response.ok) {
         // Reload search details to get updated notes
         await loadSearchDetails(selectedSearch.id);
-        setNewNote({ entityId: '', entityName: '', text: '', riskAssessment: '', actionTaken: '' });
+        setNewNote({ entityId: '', entityName: '', text: '', actionTaken: '' });
       }
     } catch (error) {
       console.error('Failed to add note:', error);
@@ -1309,7 +1315,7 @@ const MainApp = () => {
     console.warn('⚠️ Could not load current search ID after 3 attempts');
   };
 
-  const addInlineNote = async (entityId, entityName, noteText, riskAssessment = '', actionTaken = '') => {
+  const addInlineNote = async (entityId, entityName, noteText, actionTaken = '') => {
     if (!currentSearchId || !noteText.trim()) return;
     
     try {
@@ -1324,7 +1330,6 @@ const MainApp = () => {
           entity_id: entityId,
           entity_name: entityName,
           note_text: noteText,
-          risk_assessment: riskAssessment,
           action_taken: actionTaken
         })
       });
@@ -1332,7 +1337,7 @@ const MainApp = () => {
       if (response.ok) {
         // Clear the form and hide it
         setShowInlineNoteForm(null);
-        setNewNote({ entityId: '', entityName: '', text: '', riskAssessment: '', actionTaken: '' });
+        setNewNote({ entityId: '', entityName: '', text: '', actionTaken: '' });
         // Show success message
       }
     } catch (error) {
@@ -1344,7 +1349,7 @@ const MainApp = () => {
     setShowNotes(false);
     setSelectedSearch(null);
     setNotes({});
-    setNewNote({ entityId: '', entityName: '', text: '', riskAssessment: '', actionTaken: '' });
+    setNewNote({ entityId: '', entityName: '', text: '', actionTaken: '' });
     setEditingNote(null);
   };
 
@@ -1548,20 +1553,6 @@ const MainApp = () => {
           </div>
         </button>
         
-        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200 hover:shadow-md transition-shadow duration-200">
-          <div className="flex items-center justify-between">
-            <div>
-              <p className="text-sm font-medium text-gray-600">High Risk Entities</p>
-              <p className="text-3xl font-bold text-red-600">
-                {analytics?.risk_distribution?.find(r => r.level === 'HIGH')?.count || 0}
-              </p>
-              <p className="text-xs text-gray-500 mt-1">Require attention</p>
-            </div>
-            <div className="bg-red-100 p-3 rounded-full">
-              <AlertCircle className="h-6 w-6 text-red-600" />
-            </div>
-          </div>
-        </div>
         
         <button
           onClick={() => setActiveTab('blacklist')}
@@ -1598,77 +1589,49 @@ const MainApp = () => {
 
       {/* Charts Row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Risk Distribution */}
+        {/* Search Results Distribution */}
         <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-200 hover:shadow-md transition-shadow">
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-lg font-semibold flex items-center gap-2">
               <BarChart3 className="h-5 w-5 text-gray-600" />
-              Risk Level Distribution
+              Search Results Distribution
             </h3>
             <div className="text-xs text-gray-500">
               Total: {analytics?.summary?.total_searches || 0} searches
             </div>
           </div>
-          {analytics?.risk_distribution?.length > 0 ? (
+          {analytics?.summary?.total_searches > 0 ? (
             <div className="space-y-4">
-              {analytics.risk_distribution.map((risk, index) => {
-                const percentage = analytics.summary.total_searches > 0 
-                  ? ((risk.count / analytics.summary.total_searches) * 100).toFixed(1)
-                  : 0;
-                
-                return (
-                  <div key={risk.level} className="group">
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="flex items-center gap-3">
-                        <div className="flex items-center gap-2">
-                          <div className={`w-3 h-3 rounded-full ${
-                            risk.level === 'HIGH' ? 'bg-red-500' :
-                            risk.level === 'MEDIUM' ? 'bg-yellow-500' :
-                            'bg-green-500'
-                          }`}></div>
-                          <span className={`px-2 py-1 rounded text-xs font-medium ${
-                            risk.level === 'HIGH' ? 'bg-red-100 text-red-800' :
-                            risk.level === 'MEDIUM' ? 'bg-yellow-100 text-yellow-800' :
-                            'bg-green-100 text-green-800'
-                          }`}>
-                            {risk.level}
-                          </span>
-                        </div>
-                        <span className="text-sm font-medium text-gray-900">{risk.count} searches</span>
-                      </div>
-                      <span className="text-sm font-semibold text-gray-700">{percentage}%</span>
-                    </div>
-                    <div className="w-full bg-gray-200 rounded-full h-3 overflow-hidden group-hover:h-4 transition-all duration-200">
-                      <div 
-                        className={`h-full rounded-full transition-all duration-700 ease-out ${
-                          risk.level === 'HIGH' ? 'bg-gradient-to-r from-red-500 to-red-600' :
-                          risk.level === 'MEDIUM' ? 'bg-gradient-to-r from-yellow-500 to-yellow-600' :
-                          'bg-gradient-to-r from-green-500 to-green-600'
-                        }`}
-                        style={{ 
-                          width: `${percentage}%`,
-                          animationDelay: `${index * 200}ms`
-                        }}
-                      ></div>
-                    </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="bg-blue-50 p-4 rounded-lg">
+                  <div className="text-2xl font-bold text-blue-700">
+                    {analytics?.summary?.total_matches || 0}
                   </div>
-                );
-              })}
+                  <div className="text-sm text-blue-600 font-medium">Total Matches</div>
+                </div>
+                <div className="bg-green-50 p-4 rounded-lg">
+                  <div className="text-2xl font-bold text-green-700">
+                    {analytics?.summary?.clean_searches || 0}
+                  </div>
+                  <div className="text-sm text-green-600 font-medium">Clean Searches</div>
+                </div>
+              </div>
               
-              {/* Summary Stats */}
+              {/* Search Types Distribution */}
               <div className="mt-6 pt-4 border-t border-gray-100">
-                <div className="grid grid-cols-2 gap-4 text-center">
-                  <div className="bg-red-50 p-3 rounded-lg">
-                    <div className="text-lg font-bold text-red-700">
-                      {((analytics.risk_distribution.find(r => r.level === 'HIGH')?.count || 0) / analytics.summary.total_searches * 100).toFixed(1)}%
-                    </div>
-                    <div className="text-xs text-red-600 font-medium">High Risk</div>
+                <h4 className="text-sm font-semibold text-gray-700 mb-3">Search Types</h4>
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-gray-600">Entity Name</span>
+                    <span className="text-sm font-medium">
+                      {analytics?.summary?.entity_searches || 0}
+                    </span>
                   </div>
-                  <div className="bg-green-50 p-3 rounded-lg">
-                    <div className="text-lg font-bold text-green-700">
-                      {((analytics.risk_distribution.find(r => r.level === 'LOW')?.count || 0) / analytics.summary.total_searches * 100).toFixed(1)}%
-                    </div>
-                    <div className="text-xs text-green-600 font-medium">Low Risk</div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-gray-600">Batch Uploads</span>
+                    <span className="text-sm font-medium">
+                      {analytics?.summary?.batch_searches || 0}
+                    </span>
                   </div>
                 </div>
               </div>
@@ -1676,7 +1639,7 @@ const MainApp = () => {
           ) : (
             <div className="text-center py-8">
               <BarChart3 className="mx-auto h-12 w-12 text-gray-400 mb-3" />
-              <p className="text-gray-500 mb-2">No risk data available</p>
+              <p className="text-gray-500 mb-2">No search data available</p>
               <p className="text-xs text-gray-400">Data will appear after performing searches</p>
             </div>
           )}
@@ -1892,33 +1855,33 @@ const MainApp = () => {
               </div>
             </div>
             
-            {/* Risk Level Trends */}
+            {/* Recent Search Types */}
             <div className="space-y-3">
-              <h4 className="text-sm font-semibold text-gray-700">Recent Risk Levels</h4>
-              {['HIGH', 'MEDIUM', 'LOW'].map(level => {
-                const levelCount = searchHistory.slice(0, 10).filter(s => s.risk_level === level).length;
+              <h4 className="text-sm font-semibold text-gray-700">Recent Search Types</h4>
+              {['entity', 'batch', 'advanced'].map(type => {
+                const typeCount = searchHistory.slice(0, 10).filter(s => s.search_type === type).length;
                 const percentage = searchHistory.slice(0, 10).length > 0 ? 
-                  (levelCount / Math.min(searchHistory.length, 10)) * 100 : 0;
+                  (typeCount / Math.min(searchHistory.length, 10)) * 100 : 0;
                 
                 return (
-                  <div key={level} className="flex items-center justify-between">
+                  <div key={type} className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <div className={`w-3 h-3 rounded-full ${
-                        level === 'HIGH' ? 'bg-red-500' :
-                        level === 'MEDIUM' ? 'bg-yellow-500' :
+                        type === 'entity' ? 'bg-blue-500' :
+                        type === 'batch' ? 'bg-purple-500' :
                         'bg-green-500'
                       }`}></div>
-                      <span className="text-sm text-gray-700">{level}</span>
+                      <span className="text-sm text-gray-700 capitalize">{type}</span>
                     </div>
                     <div className="flex items-center gap-2">
                       <div className="w-16 bg-gray-200 rounded-full h-2">
                         <div className={`h-2 rounded-full ${
-                          level === 'HIGH' ? 'bg-red-500' :
-                          level === 'MEDIUM' ? 'bg-yellow-500' :
+                          type === 'entity' ? 'bg-blue-500' :
+                          type === 'batch' ? 'bg-purple-500' :
                           'bg-green-500'
                         }`} style={{ width: `${percentage}%` }}></div>
                       </div>
-                      <span className="text-xs text-gray-600 w-8">{levelCount}</span>
+                      <span className="text-xs text-gray-600 w-8">{typeCount}</span>
                     </div>
                   </div>
                 );
@@ -2434,9 +2397,6 @@ const MainApp = () => {
                   </div>
                 </div>
                 <div className="flex items-center gap-2">
-                  <span className={`px-2 py-1 rounded-full text-xs font-medium ${getRiskLevelColor(item.risk_level)}`}>
-                    {item.risk_level}
-                  </span>
                   <ChevronRight className="h-4 w-4 text-gray-400" />
                 </div>
               </div>
@@ -2546,502 +2506,70 @@ const MainApp = () => {
           </button>
         </div>
 
-        {/* Advanced Search Toggle */}
-        <div className="mb-4">
-          <button
-            onClick={() => setShowAdvancedSearch(!showAdvancedSearch)}
-            className="flex items-center gap-2 text-blue-600 hover:text-blue-700 transition-colors"
-          >
-            <Filter className="h-4 w-4" />
-            {showAdvancedSearch ? 'Hide Advanced Filters' : 'Show Advanced Filters'}
-            <span className="text-xs bg-blue-100 text-blue-800 px-2 py-1 rounded-full">
-              {Object.values(searchFilters).filter(v => v !== '' && v !== false && v !== 'exact' && v !== 'Person').length} active
-            </span>
-          </button>
-        </div>
-
-        {/* Advanced Search Panel */}
-        {showAdvancedSearch && (
-          <div className="mb-6 p-4 bg-gray-50 rounded-lg border">
-            <h3 className="text-lg font-semibold mb-4">Advanced Search Filters</h3>
-            
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              
-              {/* First Name */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">First Name</label>
-                <input
-                  type="text"
-                  value={searchFilters.first_name}
-                  onChange={(e) => setSearchFilters(prev => ({ ...prev, first_name: e.target.value }))}
-                  placeholder="Enter first name..."
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-              </div>
-
-              {/* Last Name */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Last Name</label>
-                <input
-                  type="text"
-                  value={searchFilters.last_name}
-                  onChange={(e) => setSearchFilters(prev => ({ ...prev, last_name: e.target.value }))}
-                  placeholder="Enter last name..."
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-              </div>
-
-              {/* Birth Date */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Birth Date</label>
-                <input
-                  type="date"
-                  value={searchFilters.birth_date}
-                  onChange={(e) => setSearchFilters(prev => ({ ...prev, birth_date: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-              </div>
-
-              {/* Place of Birth */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Place of Birth</label>
-                <input
-                  type="text"
-                  value={searchFilters.place_of_birth}
-                  onChange={(e) => setSearchFilters(prev => ({ ...prev, place_of_birth: e.target.value }))}
-                  placeholder="e.g. New York, Morocco, London..."
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-              </div>
-
-              {/* Passport Number */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Passport Number</label>
-                <input
-                  type="text"
-                  value={searchFilters.passport_number}
-                  onChange={(e) => setSearchFilters(prev => ({ ...prev, passport_number: e.target.value }))}
-                  placeholder="e.g. AB123456, XY987654..."
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-              </div>
-
-              {/* ID Number */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">ID Number</label>
-                <input
-                  type="text"
-                  value={searchFilters.id_number}
-                  onChange={(e) => setSearchFilters(prev => ({ ...prev, id_number: e.target.value }))}
-                  placeholder="e.g. Social Security, National ID..."
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-              </div>
-
-              {/* Role */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Role/Position</label>
-                <input
-                  type="text"
-                  value={searchFilters.role}
-                  onChange={(e) => setSearchFilters(prev => ({ ...prev, role: e.target.value }))}
-                  placeholder="e.g. CEO, Minister, Director..."
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-              </div>
-
-              {/* Entity Type */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Entity Type</label>
-                <select
-                  value={searchFilters.entity_type}
-                  onChange={(e) => setSearchFilters(prev => ({ ...prev, entity_type: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                >
-                  <option value="Person">Person</option>
-                  <option value="Company">Company</option>
-                  <option value="Organization">Organization</option>
-                </select>
-              </div>
-
-              {/* Country */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Country</label>
-                <input
-                  type="text"
-                  value={searchFilters.country}
-                  onChange={(e) => setSearchFilters(prev => ({ ...prev, country: e.target.value }))}
-                  placeholder="Country code (e.g. US, UK, FR, MA)"
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                />
-              </div>
-
-              {/* Topics */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">
-                  Topics
-                  <span className="text-xs text-gray-500 ml-1">(Hold Ctrl/Cmd for multiple selection)</span>
-                </label>
-                <select
-                  multiple
-                  value={searchFilters.topics}
-                  onChange={(e) => {
-                    const values = Array.from(e.target.selectedOptions, option => option.value);
-                    setSearchFilters(prev => ({ ...prev, topics: values }));
-                  }}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 min-h-[100px]"
-                  size={5}
-                >
-                  <option value="sanction">Sanctions</option>
-                  <option value="pep">Politically Exposed Persons (PEP)</option>
-                  <option value="crime">Crime</option>
-                  <option value="poi">Person of Interest</option>
-                  <option value="rca">Regulatory & Compliance Alert</option>
-                  <option value="debarment">Debarment</option>
-                  <option value="role.pep">PEP Role</option>
-                  <option value="role.rca">RCA Role</option>
-                </select>
-                {searchFilters.topics.length > 0 && (
-                  <div className="mt-1 text-xs text-gray-600">
-                    Selected: {searchFilters.topics.join(', ')}
-                  </div>
-                )}
-              </div>
-
-              {/* Dataset */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Dataset</label>
-                <select
-                  value={searchFilters.dataset}
-                  onChange={(e) => setSearchFilters(prev => ({ ...prev, dataset: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                >
-                  <option value="">All Datasets</option>
-                  <option value="default">OpenSanctions</option>
-                  <option value="moroccan_entities">Moroccan Entities</option>
-                </select>
-              </div>
-
-              {/* Search Type */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Search Type</label>
-                <select
-                  value={searchFilters.search_type}
-                  onChange={(e) => setSearchFilters(prev => ({ ...prev, search_type: e.target.value }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                >
-                  <option value="exact">Exact Match</option>
-                  <option value="partial">Partial Match</option>
-                  <option value="fuzzy">Fuzzy Search</option>
-                </select>
-              </div>
-
-              {/* Results Limit */}
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">Results to Show</label>
-                <select
-                  value={searchFilters.limit}
-                  onChange={(e) => setSearchFilters(prev => ({ ...prev, limit: parseInt(e.target.value) }))}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                >
-                  <option value={5}>5 results</option>
-                  <option value={10}>10 results</option>
-                  <option value={20}>20 results</option>
-                  <option value={50}>50 results</option>
-                  <option value={100}>100 results</option>
-                </select>
-                <p className="text-xs text-gray-500 mt-1">
-                  More results may take longer to load
-                </p>
-              </div>
-
-            </div>
-
-            {/* Date Range Filtering */}
-            <div className="mt-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
-              <h4 className="text-sm font-semibold text-blue-900 mb-3 flex items-center gap-2">
-                <Calendar className="h-4 w-4" />
-                Date Range Filtering
-              </h4>
-              <p className="text-xs text-blue-700 mb-4">
-                Filter entities by their last update or creation date in the sanctions/PEP databases
-              </p>
-              
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                {/* Quick Date Filter */}
-                <div>
-                  <label className="block text-sm font-medium text-blue-700 mb-2">Changed Since</label>
-                  <input
-                    type="date"
-                    value={searchFilters.changed_since}
-                    onChange={(e) => setSearchFilters(prev => ({ ...prev, changed_since: e.target.value, date_from: '', date_to: '' }))}
-                    className="w-full px-3 py-2 border border-blue-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
-                    title="Show entities updated since this date"
-                  />
-                  <p className="text-xs text-blue-600 mt-1">Entities updated since this date</p>
-                </div>
-
-                {/* Date Range From */}
-                <div>
-                  <label className="block text-sm font-medium text-blue-700 mb-2">From Date</label>
-                  <input
-                    type="date"
-                    value={searchFilters.date_from}
-                    onChange={(e) => {
-                      const newValue = e.target.value;
-                      setSearchFilters(prev => ({ 
-                        ...prev, 
-                        date_from: newValue, 
-                        changed_since: newValue ? '' : prev.changed_since,
-                        // Clear date_to if it becomes invalid
-                        date_to: (prev.date_to && newValue && prev.date_to < newValue) ? '' : prev.date_to
-                      }));
+        {/* Debug OpenSanctions API URL */}
+        {debugOpenSanctionsUrl && (
+          <div className="mb-4 p-3 bg-gray-50 rounded-lg border border-gray-200">
+            <div className="flex items-center justify-between">
+              <div className="flex-1">
+                <p className="text-xs font-medium text-gray-600 mb-1">Debug: Raw OpenSanctions API URL</p>
+                <div className="flex items-center gap-2 mb-2">
+                  <code className="text-xs text-gray-700 bg-white px-2 py-1 rounded border flex-1 break-all">
+                    {debugOpenSanctionsUrl}
+                  </code>
+                  <button
+                    onClick={() => {
+                      navigator.clipboard.writeText(debugOpenSanctionsUrl);
+                      // Show brief feedback
+                      const button = event.target.closest('button');
+                      const originalText = button.innerHTML;
+                      button.innerHTML = '<svg class="h-3 w-3" fill="currentColor" viewBox="0 0 20 20"><path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clip-rule="evenodd"></path></svg>';
+                      setTimeout(() => button.innerHTML = originalText, 1000);
                     }}
-                    className="w-full px-3 py-2 border border-blue-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
-                    max={new Date().toISOString().split('T')[0]} // Cannot be in the future
-                  />
+                    className="p-1.5 text-gray-500 hover:text-blue-600 hover:bg-blue-50 rounded transition-colors"
+                    title="Copy to clipboard"
+                  >
+                    <Copy className="h-3 w-3" />
+                  </button>
+                  <a
+                    href={debugOpenSanctionsUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="p-1.5 text-gray-500 hover:text-green-600 hover:bg-green-50 rounded transition-colors"
+                    title="Open in new tab"
+                  >
+                    <Globe className="h-3 w-3" />
+                  </a>
                 </div>
-
-                {/* Date Range To */}
-                <div>
-                  <label className="block text-sm font-medium text-blue-700 mb-2">To Date</label>
-                  <input
-                    type="date"
-                    value={searchFilters.date_to}
-                    onChange={(e) => {
-                      const newDate = e.target.value;
-                      if (searchFilters.date_from && newDate < searchFilters.date_from) {
-                        // Show validation message or reset
-                        return;
-                      }
-                      setSearchFilters(prev => ({ ...prev, date_to: newDate }));
-                    }}
-                    className="w-full px-3 py-2 border border-blue-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm"
-                    min={searchFilters.date_from}
-                    max={new Date().toISOString().split('T')[0]} // Cannot be in the future
-                  />
-                  {searchFilters.date_from && searchFilters.date_to && searchFilters.date_to < searchFilters.date_from && (
-                    <p className="text-xs text-red-600 mt-1">End date must be after start date</p>
-                  )}
-                </div>
-              </div>
-
-              {/* Quick Date Presets */}
-              <div className="mt-3 flex flex-wrap gap-2">
-                <button
-                  onClick={() => {
-                    const lastMonth = new Date();
-                    lastMonth.setMonth(lastMonth.getMonth() - 1);
-                    setSearchFilters(prev => ({ 
-                      ...prev, 
-                      changed_since: lastMonth.toISOString().split('T')[0],
-                      date_from: '', 
-                      date_to: '' 
-                    }));
-                  }}
-                  className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs hover:bg-blue-200 transition-colors"
-                >
-                  Last Month
-                </button>
-                <button
-                  onClick={() => {
-                    const lastWeek = new Date();
-                    lastWeek.setDate(lastWeek.getDate() - 7);
-                    setSearchFilters(prev => ({ 
-                      ...prev, 
-                      changed_since: lastWeek.toISOString().split('T')[0],
-                      date_from: '', 
-                      date_to: '' 
-                    }));
-                  }}
-                  className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs hover:bg-blue-200 transition-colors"
-                >
-                  Last Week
-                </button>
-                <button
-                  onClick={() => {
-                    const thisYear = new Date();
-                    thisYear.setMonth(0, 1); // January 1st of current year
-                    setSearchFilters(prev => ({ 
-                      ...prev, 
-                      changed_since: thisYear.toISOString().split('T')[0],
-                      date_from: '', 
-                      date_to: '' 
-                    }));
-                  }}
-                  className="px-2 py-1 bg-blue-100 text-blue-700 rounded text-xs hover:bg-blue-200 transition-colors"
-                >
-                  This Year
-                </button>
-                <button
-                  onClick={() => setSearchFilters(prev => ({ ...prev, changed_since: '', date_from: '', date_to: '' }))}
-                  className="px-2 py-1 bg-gray-100 text-gray-600 rounded text-xs hover:bg-gray-200 transition-colors"
-                >
-                  Clear Dates
-                </button>
-              </div>
-            </div>
-
-            {/* Match Thresholds Configuration */}
-            <div className="mt-6 p-4 bg-orange-50 border border-orange-200 rounded-lg">
-              <h4 className="text-sm font-semibold text-orange-900 mb-3 flex items-center gap-2">
-                <Settings className="h-4 w-4" />
-                Match Thresholds Configuration
-              </h4>
-              <p className="text-xs text-orange-700 mb-4">
-                Fine-tune the sensitivity of fuzzy matching. Lower values = more matches, higher values = stricter matches.
-              </p>
-              
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                {/* Minimum Score Threshold */}
-                <div>
-                  <label className="block text-sm font-medium text-orange-700 mb-2">
-                    Minimum Score ({searchFilters.min_score_threshold}%)
-                  </label>
-                  <input
-                    type="range"
-                    min="50"
-                    max="95"
-                    step="5"
-                    value={searchFilters.min_score_threshold}
-                    onChange={(e) => setSearchFilters(prev => ({ ...prev, min_score_threshold: parseFloat(e.target.value) }))}
-                    className="w-full"
-                  />
-                  <div className="text-xs text-orange-600 mt-1">
-                    Minimum confidence to show results
-                  </div>
-                </div>
-
-                {/* Exact Match Threshold */}
-                <div>
-                  <label className="block text-sm font-medium text-orange-700 mb-2">
-                    Exact Match ({searchFilters.exact_match_threshold}%)
-                  </label>
-                  <input
-                    type="range"
-                    min="85"
-                    max="100"
-                    step="5"
-                    value={searchFilters.exact_match_threshold}
-                    onChange={(e) => setSearchFilters(prev => ({ ...prev, exact_match_threshold: parseFloat(e.target.value) }))}
-                    className="w-full"
-                  />
-                  <div className="text-xs text-orange-600 mt-1">
-                    Threshold for "exact match" classification
-                  </div>
-                </div>
-
-                {/* Phonetic Threshold */}
-                <div>
-                  <label className="block text-sm font-medium text-orange-700 mb-2">
-                    Phonetic Match ({searchFilters.phonetic_threshold}%)
-                  </label>
-                  <input
-                    type="range"
-                    min="60"
-                    max="90"
-                    step="5"
-                    value={searchFilters.phonetic_threshold}
-                    onChange={(e) => setSearchFilters(prev => ({ ...prev, phonetic_threshold: parseFloat(e.target.value) }))}
-                    className="w-full"
-                  />
-                  <div className="text-xs text-orange-600 mt-1">
-                    Threshold for phonetic match classification
-                  </div>
-                </div>
-              </div>
-
-              {/* Preset Buttons */}
-              <div className="mt-3 flex flex-wrap gap-2">
-                <button
-                  onClick={() => setSearchFilters(prev => ({ 
-                    ...prev, 
-                    min_score_threshold: 60.0,
-                    exact_match_threshold: 90.0,
-                    phonetic_threshold: 70.0
-                  }))}
-                  className="px-2 py-1 bg-orange-100 text-orange-700 rounded text-xs hover:bg-orange-200 transition-colors"
-                >
-                  Lenient
-                </button>
-                <button
-                  onClick={() => setSearchFilters(prev => ({ 
-                    ...prev, 
-                    min_score_threshold: 75.0,
-                    exact_match_threshold: 95.0,
-                    phonetic_threshold: 80.0
-                  }))}
-                  className="px-2 py-1 bg-orange-100 text-orange-700 rounded text-xs hover:bg-orange-200 transition-colors"
-                >
-                  Default
-                </button>
-                <button
-                  onClick={() => setSearchFilters(prev => ({ 
-                    ...prev, 
-                    min_score_threshold: 85.0,
-                    exact_match_threshold: 98.0,
-                    phonetic_threshold: 90.0
-                  }))}
-                  className="px-2 py-1 bg-orange-100 text-orange-700 rounded text-xs hover:bg-orange-200 transition-colors"
-                >
-                  Strict
-                </button>
-              </div>
-            </div>
-
-            {/* Search Options */}
-            <div className="mt-6 flex flex-wrap gap-4">
-              <label className="flex items-center">
-                <input
-                  type="checkbox"
-                  checked={searchFilters.fuzzy}
-                  onChange={(e) => setSearchFilters(prev => ({ ...prev, fuzzy: e.target.checked }))}
-                  className="mr-2"
-                />
-                <span className="text-sm">Enable fuzzy search (handles typos and variations)</span>
-              </label>
-            </div>
-
-            {/* Clear Filters Button */}
-            <div className="mt-6 flex justify-between items-center">
-              <button
-                onClick={() => setSearchFilters({
-                  first_name: '',
-                  last_name: '',
-                  birth_date: '',
-                  place_of_birth: '',
-                  passport_number: '',
-                  id_number: '',
-                  role: '',
-                  country: '',
-                  topics: [],
-                  entity_type: 'Person',
-                  search_type: 'exact',
-                  dataset: '',
-                  fuzzy: false,
-                  simple: true,
-                  date_from: '',
-                  date_to: '',
-                  changed_since: '',
-                  limit: 10,
-                  min_score_threshold: 75.0,
-                  exact_match_threshold: 95.0,
-                  phonetic_threshold: 80.0
-                })}
-                className="px-4 py-2 bg-gray-500 text-white rounded hover:bg-gray-600 transition-colors"
-              >
-                Clear All Filters
-              </button>
-              
-              <div className="text-sm text-gray-600">
-                Active filters: {Object.entries(searchFilters).filter(([key, value]) => {
-                  if (Array.isArray(value)) return value.length > 0;
-                  return value !== '' && value !== false && value !== 'exact' && value !== 'Person' && value !== 20;
-                }).length}
               </div>
             </div>
           </div>
         )}
+
+        {/* Advanced Search Filters */}
+        <div className="mb-6">
+          <AdvancedSearchFilters
+            searchFilters={searchFilters}
+            setSearchFilters={setSearchFilters}
+            isExpanded={searchOptionsExpanded}
+            setIsExpanded={setSearchOptionsExpanded}
+            expandedSections={searchSectionsExpanded}
+            setExpandedSections={setSearchSectionsExpanded}
+            onApplyFilters={() => performSearch(searchInputRef.current?.value || searchQuery)}
+            onClearFilters={() => {
+              setSearchFilters({
+                schema: '',
+                topics: [],
+                countries: [],
+                datasets: [],
+                fuzzy: true,
+                simple: true,
+                threshold: 75,
+                limit: 10
+              });
+            }}
+          />
+        </div>
+
 
         {/* Error Display */}
         {error && (
@@ -3112,9 +2640,6 @@ const MainApp = () => {
                             🚫 Blacklisted Entity
                           </span>
                         )}
-                        <span className={`px-2 py-1 rounded text-xs font-medium ${getMatchTypeColor(getMatchType(result))}`}>
-                          {getMatchType(result).charAt(0).toUpperCase() + getMatchType(result).slice(1)} ({getMatchConfidence(result)}%)
-                        </span>
                         <span className="px-3 py-1 bg-blue-100 text-blue-800 rounded-full text-sm font-medium">
                           {result.schema || 'Entity'}
                         </span>
@@ -3219,13 +2744,6 @@ const MainApp = () => {
                           {result.properties?.topics?.includes('crime') && (
                             <span className="px-2 py-1 bg-purple-100 text-purple-800 rounded font-medium">🚔 CRIME</span>
                           )}
-                          <span className={`px-2 py-1 rounded font-medium ${
-                            getMatchConfidence(result) >= 90 ? 'bg-red-100 text-red-800' :
-                            getMatchConfidence(result) >= 75 ? 'bg-yellow-100 text-yellow-800' :
-                            'bg-blue-100 text-blue-800'
-                          }`}>
-                            📊 {getMatchConfidence(result)}% Match
-                          </span>
                           {result.datasets && result.datasets.length > 5 && (
                             <span className="px-2 py-1 bg-gray-100 text-gray-700 rounded font-medium">
                               📁 {result.datasets.length} Sources
@@ -3627,7 +3145,6 @@ const MainApp = () => {
                               entityId: result.id || `entity-${index}`,
                               entityName: result.caption || result.name || 'Unknown Entity',
                               text: '',
-                              riskAssessment: '',
                               actionTaken: ''
                             });
                           }}
@@ -3658,31 +3175,19 @@ const MainApp = () => {
                                 onFocus={(e) => e.target.setSelectionRange(e.target.value.length, e.target.value.length)}
                               />
                             </div>
-                            <div className="grid grid-cols-2 gap-3">
-                              <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">Risk Assessment</label>
-                                <input
-                                  type="text"
-                                  value={newNote.riskAssessment}
-                                  onChange={(e) => setNewNote({...newNote, riskAssessment: e.target.value})}
-                                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                                  placeholder="Additional risk analysis..."
-                                />
-                              </div>
-                              <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">Action Taken</label>
-                                <input
-                                  type="text"
-                                  value={newNote.actionTaken}
-                                  onChange={(e) => setNewNote({...newNote, actionTaken: e.target.value})}
-                                  className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                                  placeholder="What action did you take?"
-                                />
-                              </div>
+                            <div>
+                              <label className="block text-sm font-medium text-gray-700 mb-1">Action Taken</label>
+                              <input
+                                type="text"
+                                value={newNote.actionTaken}
+                                onChange={(e) => setNewNote({...newNote, actionTaken: e.target.value})}
+                                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                                placeholder="What action did you take?"
+                              />
                             </div>
                             <div className="flex gap-2">
                               <button
-                                onClick={() => addInlineNote(newNote.entityId, newNote.entityName, newNote.text, newNote.riskAssessment, newNote.actionTaken)}
+                                onClick={() => addInlineNote(newNote.entityId, newNote.entityName, newNote.text, newNote.actionTaken)}
                                 className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center gap-2"
                                 disabled={!newNote.text.trim()}
                               >
@@ -3692,7 +3197,7 @@ const MainApp = () => {
                               <button
                                 onClick={() => {
                                   setShowInlineNoteForm(null);
-                                  setNewNote({ entityId: '', entityName: '', text: '', riskAssessment: '', actionTaken: '' });
+                                  setNewNote({ entityId: '', entityName: '', text: '', actionTaken: '' });
                                 }}
                                 className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 flex items-center gap-2"
                               >
@@ -3749,9 +3254,8 @@ const MainApp = () => {
 
   const filteredHistory = searchHistory.filter(item => {
     switch (historyFilter) {
-      case 'high-risk': return item.risk_level === 'HIGH';
-      case 'medium-risk': return item.risk_level === 'MEDIUM';
       case 'clean': return item.results_count === 0;
+      case 'matches': return item.results_count > 0;
       default: return true;
     }
   });
@@ -3772,8 +3276,7 @@ const MainApp = () => {
               className="px-3 py-2 border border-gray-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
             >
               <option value="all">All Searches</option>
-              <option value="high-risk">🔴 High Risk</option>
-              <option value="medium-risk">🟡 Medium Risk</option>
+              <option value="matches">🔍 Has Matches</option>
               <option value="clean">✅ Clean</option>
             </select>
             <button
@@ -3825,14 +3328,14 @@ const MainApp = () => {
         </div>
         <div className="bg-white p-4 rounded-lg shadow-sm border">
           <div className="flex items-center gap-3">
-            <div className="bg-red-100 p-2 rounded-full">
-              <AlertCircle className="h-5 w-5 text-red-600" />
+            <div className="bg-blue-100 p-2 rounded-full">
+              <AlertCircle className="h-5 w-5 text-blue-600" />
             </div>
             <div>
-              <p className="text-lg font-semibold text-red-600">
-                {searchHistory.filter(s => s.risk_level === 'HIGH').length}
+              <p className="text-lg font-semibold text-blue-600">
+                {searchHistory.filter(s => s.results_count > 0).length}
               </p>
-              <p className="text-xs text-gray-600">High Risk</p>
+              <p className="text-xs text-gray-600">Matches Found</p>
             </div>
           </div>
         </div>
@@ -3850,9 +3353,6 @@ const MainApp = () => {
                 <div className="flex-1">
                   <div className="flex items-center gap-3 mb-3">
                     <h4 className="text-lg font-semibold text-gray-900">{item.query}</h4>
-                    <span className={`px-3 py-1 rounded-full text-xs font-medium ${getRiskLevelColor(item.risk_level)}`}>
-                      {item.risk_level}
-                    </span>
                     <span className="px-2 py-1 bg-gray-100 text-gray-700 rounded text-xs">
                       {item.search_type}
                     </span>
@@ -4497,9 +3997,6 @@ const MainApp = () => {
                           <h4 className="text-lg font-semibold text-gray-900">
                             {result.caption || result.name || 'Unknown Entity'}
                           </h4>
-                          <span className={`px-2 py-1 rounded text-xs font-medium ${getMatchTypeColor(getMatchType(result))}`}>
-                            {getMatchType(result).charAt(0).toUpperCase() + getMatchType(result).slice(1)} ({getMatchConfidence(result)}%)
-                          </span>
                         </div>
                         
                         <div className="grid grid-cols-2 gap-4 text-sm mb-3">
@@ -4523,7 +4020,6 @@ const MainApp = () => {
                           entityId: result.id,
                           entityName: result.caption || result.name || 'Unknown Entity',
                           text: '',
-                          riskAssessment: '',
                           actionTaken: ''
                         })}
                         className="px-3 py-1 bg-blue-600 text-white rounded-lg hover:bg-blue-700 flex items-center gap-1 text-sm"
@@ -4543,11 +4039,6 @@ const MainApp = () => {
                         {notes[result.id].map((note) => (
                           <div key={note.id} className="bg-gray-50 p-3 rounded-lg">
                             <p className="text-gray-900 mb-2">{note.note_text}</p>
-                            {note.risk_assessment && (
-                              <p className="text-sm text-orange-700 mb-1">
-                                <span className="font-medium">Risk Assessment:</span> {note.risk_assessment}
-                              </p>
-                            )}
                             {note.action_taken && (
                               <p className="text-sm text-green-700 mb-1">
                                 <span className="font-medium">Action Taken:</span> {note.action_taken}
@@ -4578,31 +4069,19 @@ const MainApp = () => {
                               onFocus={(e) => e.target.setSelectionRange(e.target.value.length, e.target.value.length)}
                             />
                           </div>
-                          <div className="grid grid-cols-2 gap-3">
-                            <div>
-                              <label className="block text-sm font-medium text-gray-700 mb-1">Risk Assessment</label>
-                              <input
-                                type="text"
-                                value={newNote.riskAssessment}
-                                onChange={(e) => setNewNote({...newNote, riskAssessment: e.target.value})}
-                                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                                placeholder="Additional risk notes..."
-                              />
-                            </div>
-                            <div>
-                              <label className="block text-sm font-medium text-gray-700 mb-1">Action Taken</label>
-                              <input
-                                type="text"
-                                value={newNote.actionTaken}
-                                onChange={(e) => setNewNote({...newNote, actionTaken: e.target.value})}
-                                className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                                placeholder="What did you do?"
-                              />
-                            </div>
+                          <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Action Taken</label>
+                            <input
+                              type="text"
+                              value={newNote.actionTaken}
+                              onChange={(e) => setNewNote({...newNote, actionTaken: e.target.value})}
+                              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
+                              placeholder="What did you do?"
+                            />
                           </div>
                           <div className="flex gap-2">
                             <button
-                              onClick={() => addNote(newNote.entityId, newNote.entityName, newNote.text, newNote.riskAssessment, newNote.actionTaken)}
+                              onClick={() => addNote(newNote.entityId, newNote.entityName, newNote.text, newNote.actionTaken)}
                               className="px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 flex items-center gap-2"
                               disabled={!newNote.text.trim()}
                             >
@@ -4610,7 +4089,7 @@ const MainApp = () => {
                               Save Note
                             </button>
                             <button
-                              onClick={() => setNewNote({ entityId: '', entityName: '', text: '', riskAssessment: '', actionTaken: '' })}
+                              onClick={() => setNewNote({ entityId: '', entityName: '', text: '', actionTaken: '' })}
                               className="px-4 py-2 bg-gray-600 text-white rounded-lg hover:bg-gray-700 flex items-center gap-2"
                             >
                               <X className="h-4 w-4" />
@@ -6081,7 +5560,7 @@ const MainApp = () => {
                   <div key={search.id} className="p-2 bg-gray-50 rounded text-sm">
                     <div className="font-medium">{search.query}</div>
                     <div className="text-gray-500">
-                      {search.results_count} results • {search.risk_level} risk • {new Date(search.created_at).toLocaleDateString()}
+                      {search.results_count} results • {new Date(search.created_at).toLocaleDateString()}
                     </div>
                   </div>
                 ))
@@ -6610,6 +6089,17 @@ const MainApp = () => {
                     <span className="truncate">User Management</span>
                   </button>
                   <button
+                    onClick={() => setActiveTab('documentation')}
+                    className={`w-full flex items-center gap-3 px-3 py-3 text-sm font-medium rounded-lg transition-colors text-left ${
+                      activeTab === 'documentation'
+                        ? 'bg-blue-100 text-blue-700 border-l-4 border-blue-600'
+                        : 'text-gray-600 hover:text-gray-900 hover:bg-gray-100'
+                    }`}
+                  >
+                    <BookOpen className="h-5 w-5 flex-shrink-0" />
+                    <span className="truncate">Documentation</span>
+                  </button>
+                  <button
                     onClick={() => setActiveTab('audit')}
                     className={`w-full flex items-center gap-3 px-3 py-3 text-sm font-medium rounded-lg transition-colors text-left ${
                       activeTab === 'audit'
@@ -6638,6 +6128,7 @@ const MainApp = () => {
         {activeTab === 'blacklist' && <BlacklistView />}
         {activeTab === 'profile' && <ProfileView />}
         {activeTab === 'users' && isAdmin && <StandaloneUserManagement />}
+        {activeTab === 'documentation' && isAdmin && <Documentation />}
         {activeTab === 'audit' && isAdmin && <AuditView />}
       </main>
       </div>

@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Building2, Plus, Users, Shield, BarChart3, Eye, X, Trash2 } from 'lucide-react';
 import EntityProfile from './EntityProfile';
-import RiskMatrixVisualization from './RiskMatrixVisualization';
 
 interface Entity {
   id: number;
@@ -10,7 +9,6 @@ interface Entity {
   category: string;
   registration_number?: string;
   status: string;
-  current_risk_level?: string;
   directors_count: number;
   lbc_contacts_count: number;
   created_at: string;
@@ -356,7 +354,6 @@ const EntityManagement: React.FC<EntityManagementProps> = ({ isAdmin = false }) 
         category: newEntity.category,
         registration_number: newEntity.registration_number,
         status: newEntity.status,
-        current_risk_level: null,
         directors_count: 0,
         lbc_contacts_count: 0,
         created_at: newEntity.created_at
@@ -439,22 +436,6 @@ const EntityManagement: React.FC<EntityManagementProps> = ({ isAdmin = false }) 
     );
   }
 
-  // Show risk matrix for selected entity
-  if (currentView === 'matrix' && selectedEntity) {
-    return (
-      <div>
-        <div className="mb-4">
-          <button
-            onClick={handleBackToList}
-            className="flex items-center text-blue-600 hover:text-blue-800"
-          >
-            ← Back to Entity List
-          </button>
-        </div>
-        <RiskMatrixVisualization entityId={selectedEntity} />
-      </div>
-    );
-  }
 
   // Entity list view
   return (
@@ -513,9 +494,9 @@ const EntityManagement: React.FC<EntityManagementProps> = ({ isAdmin = false }) 
               <Shield className="h-6 w-6 text-orange-600" />
             </div>
             <div className="ml-4">
-              <p className="text-sm font-medium text-gray-600">With Risk Scores</p>
+              <p className="text-sm font-medium text-gray-600">Total Directors</p>
               <p className="text-2xl font-semibold text-gray-900">
-                {entities.filter(e => e.current_risk_level).length}
+                {entities.reduce((sum, e) => sum + (e.directors_count || 0), 0)}
               </p>
             </div>
           </div>
@@ -527,9 +508,9 @@ const EntityManagement: React.FC<EntityManagementProps> = ({ isAdmin = false }) 
               <BarChart3 className="h-6 w-6 text-purple-600" />
             </div>
             <div className="ml-4">
-              <p className="text-sm font-medium text-gray-600">High Risk</p>
+              <p className="text-sm font-medium text-gray-600">LBC Contacts</p>
               <p className="text-2xl font-semibold text-gray-900">
-                {entities.filter(e => e.current_risk_level === 'high' || e.current_risk_level === 'critical').length}
+                {entities.reduce((sum, e) => sum + (e.lbc_contacts_count || 0), 0)}
               </p>
             </div>
           </div>
@@ -554,9 +535,6 @@ const EntityManagement: React.FC<EntityManagementProps> = ({ isAdmin = false }) 
                 </th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                   Status
-                </th>
-                <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Risk Level
                 </th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
                   Team Size
@@ -596,21 +574,6 @@ const EntityManagement: React.FC<EntityManagementProps> = ({ isAdmin = false }) 
                       {entity.status.toUpperCase()}
                     </span>
                   </td>
-                  <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-900">
-                    {entity.current_risk_level ? (
-                      <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
-                        entity.current_risk_level === 'high' || entity.current_risk_level === 'critical'
-                          ? 'bg-red-100 text-red-800'
-                          : entity.current_risk_level === 'medium'
-                          ? 'bg-yellow-100 text-yellow-800'
-                          : 'bg-green-100 text-green-800'
-                      }`}>
-                        {entity.current_risk_level.toUpperCase()}
-                      </span>
-                    ) : (
-                      <span className="text-gray-400 text-xs">Not assessed</span>
-                    )}
-                  </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
                     <div className="flex items-center space-x-2">
                       <span className="flex items-center text-xs">
@@ -632,15 +595,6 @@ const EntityManagement: React.FC<EntityManagementProps> = ({ isAdmin = false }) 
                         <Eye className="h-3 w-3 mr-1" />
                         Profile
                       </button>
-                      {entity.current_risk_level && (
-                        <button
-                          onClick={() => handleEntitySelect(entity.id, 'matrix')}
-                          className="text-green-600 hover:text-green-900 flex items-center text-xs"
-                        >
-                          <BarChart3 className="h-3 w-3 mr-1" />
-                          Risk Matrix
-                        </button>
-                      )}
                       {isAdmin && (
                         <button
                           onClick={() => deleteEntity(entity.id, entity.denomination)}

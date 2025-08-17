@@ -1,5 +1,5 @@
 from fastapi import APIRouter
-from app.api.v1.endpoints import search, health, auth, entities, risk_scoring, search_history, audit, reports, collaboration, data_sources
+from app.api.v1.endpoints import search, health, auth, entities, risk_scoring, search_history, audit, reports, collaboration, data_sources, documentation
 
 api_router = APIRouter()
 api_router.include_router(health.router, prefix="/health", tags=["health"])
@@ -16,3 +16,6 @@ api_router.include_router(collaboration.router, prefix="/collaboration", tags=["
 
 # Phase 4 Data Integration Features - New data source management
 api_router.include_router(data_sources.router, prefix="/data-sources", tags=["data_integration"])
+
+# Admin Documentation Access
+api_router.include_router(documentation.router, prefix="/documentation", tags=["admin_documentation"])
